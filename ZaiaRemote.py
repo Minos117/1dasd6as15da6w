@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import sys, os, json, socket, threading, time, io, ctypes, subprocess, winreg, re, ipaddress, uuid, urllib.request
+import sys, os, json, socket, threading, time, io, ctypes, subprocess, winreg, re, ipaddress, uuid, urllib.request, zlib, queue
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from PIL import Image, ImageGrab, ImageChops
@@ -9,13 +9,18 @@ try:
 except Exception:
     TkinterDnD = None
 DND = [False]
+try:
+    import av  # H.264: ลื่นและคมกว่า JPEG ใช้เน็ตน้อยกว่า ~10 เท่า (ไม่มี -> ใช้ JPEG เหมือนเดิม)
+except Exception:
+    av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "1.8.2"
+APP_VER = "1.8.4"
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_ZT_NETWORK_ID = "b103a835d26ef7ce"
 PORT = 47101
-JPEG_Q = 55
+JPEG_Q = 60
+JPEG_MIN, JPEG_MAX = 35, 82  # ปรับคุณภาพ JPEG อัตโนมัติตามความเร็วเน็ต
 QUALITY = [(1280, 30, "720p 30fps"), (1920, 30, "1080p 30fps"), (1920, 60, "1080p 60fps")]  # (กว้างสูงสุด, fps, ชื่อ)
 CTRL_PORT = 47102
 APPDIR = os.path.join(os.environ["APPDATA"], "ZaiaRemote")
@@ -410,12 +415,13 @@ def control_server():
             try: hello = client.recv(1)
             except socket.timeout: hello = None
             except Exception: hello = b""
-            q = 1
+            q, h264 = 1, False
             if hello == b"V":  # 1.6 ส่งระดับคุณภาพต่อท้าย (0-2); รุ่น 1.5 ไม่ส่ง ใช้ค่ากลาง
                 try:
                     client.settimeout(0.5)
                     qb = client.recv(1)
                     if qb and qb[0] < len(QUALITY): q = qb[0]
+                    h264 = client.recv(1) == b"H"  # 1.8.4 ขึ้นไปบอกว่าถอดรหัส H.264 ได้
                 except Exception:
                     pass
             client.settimeout(None)
@@ -426,7 +432,7 @@ def control_server():
             if ans != 6:  # IDYES
                 client.close()
                 continue
-            threading.Thread(target=handle_control_client, args=(client, q), daemon=True).start()
+            threading.Thread(target=handle_control_client, args=(client, q, h264 and av is not None), daemon=True).start()
         except Exception as e:
             log_err(e)
 
@@ -451,6 +457,7 @@ def make_grabber():
         mon = sct.monitors[1]
         def g():
             sh = sct.grab(mon)
+            g.sig = zlib.adler32(sh.bgra)  # เช็กจอเปลี่ยนแบบเร็ว ไม่ต้องเทียบทีละพิกเซล
             return Image.frombytes("RGB", sh.size, sh.bgra, "raw", "BGRX")
         return g
     except Exception as e:
@@ -478,7 +485,39 @@ def send_file_to_client(client, lock, path):  # แพ็กเก็ตไฟ�
         try: pkt(b"X", f"ส่งไฟล์ไม่สำเร็จ: {e}".encode("utf-8"))
         except Exception: pass
 
-def handle_control_client(client, q=1):
+def stream_h264(client, grab, gone, lock, maxw, fps):
+    enc, size, n = None, None, 0
+    iv = 1 / fps
+    prev_sig = None
+    while not gone.is_set():
+        t0 = time.time()
+        try: frame = grab()
+        except Exception:
+            time.sleep(1); continue
+        sg = getattr(grab, "sig", None)
+        if sg is not None and sg == prev_sig:
+            time.sleep(0.005); continue
+        prev_sig = sg
+        mw = min(maxw, frame.width) // 2 * 2
+        mh = frame.height * mw // frame.width // 2 * 2
+        if enc is None or size != (mw, mh):
+            enc = av.CodecContext.create("libx264", "w")
+            enc.width, enc.height, enc.pix_fmt = mw, mh, "yuv420p"
+            enc.framerate, enc.time_base = fps, __import__("fractions").Fraction(1, fps)
+            enc.options = {"preset": "ultrafast", "tune": "zerolatency", "bf": "0",
+                           "x264-params": f"crf=23:keyint={fps * 2}:vbv-maxrate=12000:vbv-bufsize=6000"}
+            enc.open()
+            size = (mw, mh)
+        vf = av.VideoFrame.from_image(frame.convert("RGB")).reformat(width=mw, height=mh, format="yuv420p")
+        vf.pts = n; n += 1
+        for pk in enc.encode(vf):
+            d = bytes(pk)
+            with lock:  # ส่งตรง ไม่ทิ้งเฟรม (P-frame ทิ้งไม่ได้) เน็ตช้า TCP จะชะลอรอบจับภาพเอง
+                client.sendall((len(d) | 0x40000000).to_bytes(4, "little") + d)
+        dt = time.time() - t0
+        if dt < iv: time.sleep(iv - dt)
+
+def handle_control_client(client, q=1, h264=False):
     maxw, fps, _ = QUALITY[q]
     lock = threading.Lock()
     try:
@@ -488,7 +527,29 @@ def handle_control_client(client, q=1):
         client.sendall(w.to_bytes(4, "little") + h.to_bytes(4, "little"))
         gone = threading.Event()
         threading.Thread(target=apply_input_loop, args=(client, gone, lock), daemon=True).start()
-        prev = None
+        if h264:
+            try:
+                stream_h264(client, grab, gone, lock, maxw, fps)
+                return
+            except Exception as e:  # encoder ใช้ไม่ได้ (ไม่มี libx264) -> สาย TCP อาจเสียแล้ว ปิดแล้วให้ฝั่งดูต่อใหม่ (ได้ JPEG)
+                log_err(e)
+                return
+        slot = queue.Queue(maxsize=1)  # เก็บแค่เฟรมล่าสุด เน็ตช้าก็ทิ้งเฟรมเก่า ภาพไม่ค้างสะสม
+        st = {"send": 0.0}
+        def sender():
+            try:
+                while not gone.is_set():
+                    try: data = slot.get(timeout=0.2)
+                    except queue.Empty: continue
+                    t = time.time()
+                    with lock:
+                        client.sendall(len(data).to_bytes(4, "little") + data)
+                    st["send"] = time.time() - t
+            except Exception as e:
+                log_err(e)
+                gone.set()
+        threading.Thread(target=sender, daemon=True).start()
+        prev, prev_sig, qual, scl, iv = None, None, JPEG_Q, 1.0, 1 / fps
         while not gone.is_set():
             t0 = time.time()
             try:
@@ -496,20 +557,37 @@ def handle_control_client(client, q=1):
             except Exception:  # เซิร์ฟเวอร์: RDP ถูกตัด/จอล็อก จับภาพไม่ได้ชั่วคราว
                 time.sleep(1)
                 continue
-            if frame.width > maxw:
-                frame = frame.resize((maxw, frame.height * maxw // frame.width), Image.BILINEAR)
-            if prev is not None and prev.size == frame.size and ImageChops.difference(prev, frame).getbbox() is None:
-                time.sleep(0.01)
+            sg = getattr(grab, "sig", None)
+            if sg is not None and sg == prev_sig:
+                time.sleep(0.005)
                 continue
-            prev = frame
+            prev_sig = sg
+            mw = max(int(maxw * scl), 320)
+            if frame.width > mw:
+                frame = frame.resize((mw, frame.height * mw // frame.width), Image.BILINEAR)
+            if sg is None:  # ไม่มี mss -> เทียบภาพแบบช้า
+                if prev is not None and prev.size == frame.size and ImageChops.difference(prev, frame).getbbox() is None:
+                    time.sleep(0.01)
+                    continue
+                prev = frame
             buf = io.BytesIO()
-            frame.save(buf, format="JPEG", quality=JPEG_Q)
+            frame.save(buf, format="JPEG", quality=qual)
             data = buf.getvalue()
-            with lock:
-                client.sendall(len(data).to_bytes(4, "little") + data)
+            try: slot.put_nowait(data)
+            except queue.Full:
+                try: slot.get_nowait()
+                except queue.Empty: pass
+                slot.put_nowait(data)
+            s_t = st["send"]  # ส่งช้ากว่าเฟรมเรต -> ลดคุณภาพก่อน แล้วลดขนาด / ส่งเร็ว -> คืนขนาดก่อน แล้วเพิ่มคุณภาพ
+            if s_t > iv * 1.3:
+                if qual > JPEG_MIN: qual = max(JPEG_MIN, qual - 7)
+                elif scl > 0.5: scl = max(0.5, scl - 0.15)
+            elif s_t < iv * 0.5:
+                if scl < 1.0: scl = min(1.0, scl + 0.05)
+                elif qual < JPEG_MAX: qual = min(JPEG_MAX, qual + 2)
             dt = time.time() - t0
-            if dt < 1 / fps:
-                time.sleep(1 / fps - dt)
+            if dt < iv:
+                time.sleep(iv - dt)
     except Exception as e:
         log_err(e)
     finally:
@@ -594,7 +672,7 @@ def open_viewer(ips, q=1):
         s.settimeout(5)
         try:
             s.connect((ip, CTRL_PORT))
-            s.sendall(b"V" + bytes([q]))
+            s.sendall(b"V" + bytes([q]) + (b"H" if av is not None else b"-"))
             sock = s
             break
         except socket.timeout:
@@ -664,28 +742,39 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel=""):
         elif t == b"X":
             say(d.decode("utf-8", "replace"), "#ff6b6b")
 
+    dec = [None]
+
     def recv_frames():
         try:
             while alive[0]:
                 lb = recv_exact(sock, 4)
                 if not lb: break
                 n = int.from_bytes(lb, "little")
-                data = recv_exact(sock, n & 0x7FFFFFFF)
+                data = recv_exact(sock, n & 0x3FFFFFFF)
                 if not data: break
                 if n & 0x80000000:
                     on_file_packet(data)
                     continue
-                im = Image.open(io.BytesIO(data))
-                im.load()
-                latest["d"] = im
+                if n & 0x40000000:
+                    if dec[0] is None: dec[0] = av.CodecContext.create("h264", "r")
+                    fr = dec[0].decode(av.Packet(data))
+                    if not fr: continue
+                    im = fr[-1].to_image()
+                else:
+                    im = Image.open(io.BytesIO(data))
+                    im.load()
+                dw_, dh_ = g.get("dw", 1), g.get("dh", 1)
+                rs = im.resize((dw_, dh_), Image.BILINEAR) if dw_ > 1 and dh_ > 1 else None
+                latest["d"] = (im, rs)
         except Exception as e:
             log_err(e)
         if rf["fh"]: rf["fh"].close()
         alive[0] = False
 
     def poll():
-        im = latest["d"]
+        cur = latest["d"]
         latest["d"] = None
+        im, rs = cur if cur else (None, None)
         cw, ch = canvas.winfo_width() or 1, canvas.winfo_height() or 1
         if im is not None:
             g["last"] = im
@@ -697,7 +786,7 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel=""):
                 sc = min(cw / remote_w, ch / remote_h)
                 dw, dh = max(int(remote_w * sc), 1), max(int(remote_h * sc), 1)
                 g.update(ox=(cw - dw) // 2, oy=(ch - dh) // 2, dw=dw, dh=dh)
-                g["photo"] = ImageTk.PhotoImage(im.resize((dw, dh), Image.BILINEAR))
+                g["photo"] = ImageTk.PhotoImage(rs if rs is not None and rs.size == (dw, dh) else im.resize((dw, dh), Image.BILINEAR))
                 if g["item"] is None:
                     g["item"] = canvas.create_image(g["ox"], g["oy"], anchor="nw", image=g["photo"])
                 else:
@@ -958,8 +1047,8 @@ def main():
         w.resizable(False, False)
         tk.Label(w, text="เลือกคุณภาพภาพ", bg=PANEL, fg=TEXT, font=("Tahoma", 17, "bold")).pack(anchor="w", padx=20, pady=(16, 2))
         tk.Label(w, text=f"เชื่อมต่อกับ {who}", bg=PANEL, fg=SUBTEXT).pack(anchor="w", padx=20, pady=(0, 8))
-        v = tk.IntVar(value=1)
-        for i, txt in enumerate(("ประหยัด  720p 30fps", "กลาง  1080p 30fps (แนะนำ)", "สูง  1080p 60fps (ต้องเน็ตและเครื่องแรง)")):
+        v = tk.IntVar(value=2)
+        for i, txt in enumerate(("ประหยัด  720p 30fps", "กลาง  1080p 30fps", "สูงสุด  1080p 60fps (ลื่นสุด ปรับตามเน็ตอัตโนมัติ)")):
             tk.Radiobutton(w, text=txt, variable=v, value=i, bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL,
                            activeforeground=TEXT, anchor="w").pack(fill="x", padx=20, pady=2)
         def ok():
@@ -1145,7 +1234,10 @@ def main():
             else:
                 (good if ZT["ok"] else bad)("ZeroTier: " + ZT["msg"])
                 leaf = [l for l in (zt_run("peers") or "").splitlines() if " LEAF " in l]
-                if leaf: good(f"เห็นเครื่อง ZeroTier อื่น {len(leaf)} เครื่อง")
+                if leaf:
+                    good(f"เห็นเครื่อง ZeroTier อื่น {len(leaf)} เครื่อง")
+                    nd = len([l for l in leaf if " DIRECT " in l])
+                    (good if nd else bad)(f"เส้นทางตรง (DIRECT) {nd}/{len(leaf)} เครื่อง" + ("" if nd else " → ตอนนี้อ้อมผ่านเซิร์ฟเวอร์ ภาพจะช้า/กระตุก เช็ก NAT/Firewall ของ router"))
                 else: bad("ไม่เห็นเครื่อง ZeroTier อื่นเลย → อีกเครื่องปิดอยู่ / ZeroTier ไม่ทำงาน / ยังไม่ติ๊ก Auth ใน Central")
             if PORT_OK["udp"]: good(f"พอร์ตค้นหา UDP {PORT} เปิดรับได้")
             else: bad(f"เปิดพอร์ต UDP {PORT} ไม่ได้ → มีโปรแกรมนี้เปิดซ้ำ/โปรแกรมอื่นใช้พอร์ต")
