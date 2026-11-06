@@ -15,7 +15,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "1.8.4"
+APP_VER = "1.9.0"
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_ZT_NETWORK_ID = "b103a835d26ef7ce"
 PORT = 47101
@@ -106,6 +106,8 @@ def apply_update(data):
     os._exit(0)
 
 try: ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception: pass
+try: ctypes.windll.winmm.timeBeginPeriod(1)  # นาฬิกา Windows ปกติหยาบ ~15ms -> sleep() คุมจังหวะเฟรมไม่ได้ 60fps จะสะดุด
 except Exception: pass
 
 # ---------- admin / elevate ----------
@@ -381,13 +383,14 @@ MOUSE_FLAGS_UP   = {0: 0x0004, 1: 0x0010, 2: 0x0040}
 def keybd_event(vk, up=False): user32.keybd_event(vk, 0, 2 if up else 0, 0)
 
 def recv_exact(sock, n):
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
+    buf = bytearray(n)  # รับลง buffer เดียว (เดิมต่อ bytes ทีละก้อน = ก๊อปซ้ำ ๆ ช้าเมื่อเฟรมใหญ่)
+    mv, got = memoryview(buf), 0
+    while got < n:
+        k = sock.recv_into(mv[got:], n - got)
+        if not k:
             return None
-        buf += chunk
-    return buf
+        got += k
+    return bytes(buf)
 
 # ---------- control server (host side) ----------
 def peer_name(ip):
@@ -455,10 +458,19 @@ def make_grabber():
         import mss
         sct = mss.mss()
         mon = sct.monitors[1]
-        def g():
+        st = {"prev": None, "n": 0}
+        def raw():  # คืน (ขนาด, bytes BGRA) ไม่แปลงเป็นภาพ PIL (แปลงช้า); เทียบกับเฟรมก่อนด้วย memcmp
             sh = sct.grab(mon)
-            g.sig = zlib.adler32(sh.bgra)  # เช็กจอเปลี่ยนแบบเร็ว ไม่ต้องเทียบทีละพิกเซล
-            return Image.frombytes("RGB", sh.size, sh.bgra, "raw", "BGRX")
+            b = sh.raw
+            if b != st["prev"]:
+                st["n"] += 1
+                st["prev"] = b
+            g.sig = st["n"]
+            return sh.size, b
+        def g():
+            size, b = raw()
+            return Image.frombytes("RGB", size, b, "raw", "BGRX")
+        g.raw = raw
         return g
     except Exception as e:
         log_err(e)
@@ -485,43 +497,87 @@ def send_file_to_client(client, lock, path):  # แพ็กเก็ตไฟ�
         try: pkt(b"X", f"ส่งไฟล์ไม่สำเร็จ: {e}".encode("utf-8"))
         except Exception: pass
 
+# (สเกลภาพ, บิตเรต kbps) เรียงจากดีสุดไปประหยัดสุด ขยับทีละขั้น ไม่เกินทุก 1.5 วินาที (ทุกครั้งที่ขยับ encoder ถูกสร้างใหม่ = มีเฟรมเต็มหนึ่งเฟรม)
+LEVELS = [(1.0, 12000), (1.0, 8000), (1.0, 5000), (0.75, 3500), (0.75, 2500), (0.5, 1800), (0.5, 1000)]
+
+def bgra_to_vf(size, b):  # BGRA -> VideoFrame ตรง ๆ (เร็วกว่าผ่าน PIL หลายเท่า); บางความกว้าง (เช่น 1366) แถวถูกเติมให้ยาวขึ้น ต้องก๊อปทีละแถว
+    w, h = size
+    vf = av.VideoFrame(w, h, "bgra")
+    pl = vf.planes[0]
+    ls, rw = pl.line_size, w * 4
+    if ls == rw:
+        pl.update(b)
+    else:
+        buf, mv = bytearray(ls * h), memoryview(b)
+        for y in range(h):
+            buf[y * ls:y * ls + rw] = mv[y * rw:(y + 1) * rw]
+        pl.update(buf)
+    return vf
+
 def stream_h264(client, grab, gone, lock, maxw, fps):
+    from fractions import Fraction
+    raw = getattr(grab, "raw", None)
     enc, size, n = None, None, 0
+    lv = 1  # เริ่มที่ 8 Mbps แล้วค่อยขยับขึ้นเมื่อเน็ตไหว ไม่เริ่มสุดแล้วค้าง
+    ema_enc = ema_send = 0.0
+    up_wait, t_change, t_bad, t_up = 6.0, 0.0, time.time(), 0.0
     iv = 1 / fps
+    nxt = time.time()
     prev_sig = None
     while not gone.is_set():
-        t0 = time.time()
-        try: frame = grab()
+        try:
+            if raw: sz, b = raw()
+            else:
+                im = grab(); sz = im.size
         except Exception:
             time.sleep(1); continue
         sg = getattr(grab, "sig", None)
         if sg is not None and sg == prev_sig:
-            time.sleep(0.005); continue
+            time.sleep(0.004); continue
         prev_sig = sg
-        mw = min(maxw, frame.width) // 2 * 2
-        mh = frame.height * mw // frame.width // 2 * 2
+        t_cap = time.time()
+        scl, br = LEVELS[lv]
+        mw = max(min(int(maxw * scl), sz[0]) // 2 * 2, 320)
+        mh = max(sz[1] * mw // sz[0] // 2 * 2, 240)
         if enc is None or size != (mw, mh):
             enc = av.CodecContext.create("libx264", "w")
             enc.width, enc.height, enc.pix_fmt = mw, mh, "yuv420p"
-            enc.framerate, enc.time_base = fps, __import__("fractions").Fraction(1, fps)
+            enc.framerate, enc.time_base = fps, Fraction(1, fps)
+            # intra-refresh: ไม่มีเฟรมเต็ม (I-frame) ก้อนใหญ่ทุก 2 วินาที ที่ทำให้ภาพสะดุดบนเน็ตช้า / vbv-bufsize เล็ก = ขนาดแต่ละเฟรมไม่พุ่ง
             enc.options = {"preset": "ultrafast", "tune": "zerolatency", "bf": "0",
-                           "x264-params": f"crf=23:keyint={fps * 2}:vbv-maxrate=12000:vbv-bufsize=6000"}
+                           "x264-params": f"crf=23:keyint={fps * 2}:intra-refresh=1:vbv-maxrate={br}:vbv-bufsize={max(br // fps * 3, 200)}"}
             enc.open()
             size = (mw, mh)
-        vf = av.VideoFrame.from_image(frame.convert("RGB")).reformat(width=mw, height=mh, format="yuv420p")
+        vf = bgra_to_vf(sz, b) if raw else av.VideoFrame.from_image(im.convert("RGB"))
+        vf = vf.reformat(width=mw, height=mh, format="yuv420p")
         vf.pts = n; n += 1
-        for pk in enc.encode(vf):
-            d = bytes(pk)
+        pks = [bytes(pk) for pk in enc.encode(vf)]
+        t_enc = time.time()
+        for d in pks:
             with lock:  # ส่งตรง ไม่ทิ้งเฟรม (P-frame ทิ้งไม่ได้) เน็ตช้า TCP จะชะลอรอบจับภาพเอง
                 client.sendall((len(d) | 0x40000000).to_bytes(4, "little") + d)
-        dt = time.time() - t0
-        if dt < iv: time.sleep(iv - dt)
+        t_end = time.time()
+        ema_enc = ema_enc * 0.8 + (t_enc - t_cap) * 0.2    # CPU: แปลง+เข้ารหัส (ไม่รวมเวลาจับภาพ)
+        ema_send = ema_send * 0.8 + (t_end - t_enc) * 0.2  # เน็ต: เวลาที่ sendall ค้างรอเพราะส่งไม่ทัน
+        good = ema_send < iv * 0.3 and ema_enc < iv * 0.6
+        if not good: t_bad = t_end
+        if t_end - t_change > 1.5:
+            if (ema_send > iv * 0.9 or ema_enc > iv * 1.2) and lv < len(LEVELS) - 1:
+                if t_end - t_up < 20: up_wait = min(up_wait * 2, 60)  # เพิ่งขยับขึ้นแล้วตกลงมาอีก -> รอนานขึ้นก่อนลองใหม่ กันภาพแกว่ง
+                lv += 1; enc = None; t_change = t_bad = t_end
+            elif good and lv > 0 and t_end - t_bad > up_wait:
+                lv -= 1; enc = None; t_change = t_bad = t_up = t_end
+        nxt += iv  # นับจังหวะแบบสะสม ไม่ใช่ sleep เท่ากันทุกรอบ (กันเฟรมเรตค่อย ๆ เพี้ยน)
+        now = time.time()
+        if nxt > now: time.sleep(nxt - now)
+        elif now - nxt > iv: nxt = now
 
 def handle_control_client(client, q=1, h264=False):
     maxw, fps, _ = QUALITY[q]
     lock = threading.Lock()
     try:
         client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 524288)  # BDP ของ ZeroTier สูง buffer ส่งเล็กเกินทำให้ความเร็วตก (ใหญ่เกินจะหน่วง)
         grab = make_grabber()
         w, h = grab().size
         client.sendall(w.to_bytes(4, "little") + h.to_bytes(4, "little"))
@@ -669,6 +725,7 @@ def open_viewer(ips, q=1):
         notify(f"กำลังเชื่อมต่อ {ip} ...")
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)  # ต้องตั้งก่อน connect
         s.settimeout(5)
         try:
             s.connect((ip, CTRL_PORT))
@@ -743,8 +800,10 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel=""):
             say(d.decode("utf-8", "replace"), "#ff6b6b")
 
     dec = [None]
+    slot = {"f": None}
+    ev = threading.Event()
 
-    def recv_frames():
+    def recv_frames():  # รับ+ถอดรหัสทุกเฟรมตามลำดับ (จำเป็นต่อ H.264) แต่ไม่แปลงภาพ ปล่อยให้ render_loop ทำเฉพาะเฟรมล่าสุด
         try:
             while alive[0]:
                 lb = recv_exact(sock, 4)
@@ -759,43 +818,65 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel=""):
                     if dec[0] is None: dec[0] = av.CodecContext.create("h264", "r")
                     fr = dec[0].decode(av.Packet(data))
                     if not fr: continue
-                    im = fr[-1].to_image()
+                    slot["f"] = fr[-1]
                 else:
                     im = Image.open(io.BytesIO(data))
                     im.load()
-                dw_, dh_ = g.get("dw", 1), g.get("dh", 1)
-                rs = im.resize((dw_, dh_), Image.BILINEAR) if dw_ > 1 and dh_ > 1 else None
-                latest["d"] = (im, rs)
+                    slot["f"] = im
+                ev.set()
         except Exception as e:
             log_err(e)
         if rf["fh"]: rf["fh"].close()
         alive[0] = False
+        ev.set()
+
+    def render_loop():  # ย่อเป็นขนาดที่แสดงจริงด้วย swscale (เร็วกว่า PIL ย่อ ~4 เท่า) และวาดใหม่เมื่อหน้าต่างเปลี่ยนขนาดแม้จอปลายทางนิ่ง
+        last, dims = None, None
+        while alive[0]:
+            ev.wait(0.1)
+            ev.clear()
+            f = slot["f"]
+            slot["f"] = None
+            want = g.get("want")
+            if f is None and (last is None or want == dims):
+                continue
+            if f is not None: last = f
+            dims = want
+            try:
+                if isinstance(last, Image.Image):
+                    im = last.resize(want, Image.BILINEAR) if want and want[0] > 1 else last
+                elif want and want[0] > 1:
+                    im = last.reformat(width=want[0], height=want[1], format="rgb24").to_image()
+                else:
+                    im = last.to_image()
+                latest["d"] = im
+            except Exception as e:
+                log_err(e)
 
     def poll():
-        cur = latest["d"]
-        latest["d"] = None
-        im, rs = cur if cur else (None, None)
         cw, ch = canvas.winfo_width() or 1, canvas.winfo_height() or 1
+        sc = min(cw / remote_w, ch / remote_h)
+        dw, dh = max(int(remote_w * sc), 1), max(int(remote_h * sc), 1)
+        g.update(ox=(cw - dw) // 2, oy=(ch - dh) // 2, dw=dw, dh=dh, want=(dw, dh))
+        im = latest["d"]
+        latest["d"] = None
         if im is not None:
-            g["last"] = im
-        elif g.get("last") is not None and (cw, ch) != g.get("cs"):
-            im = g["last"]  # จอปลายทางนิ่งไม่ส่งเฟรมใหม่ -> วาดภาพเดิมซ้ำตามขนาดหน้าต่างใหม่
-        if im is not None:
-            g["cs"] = (cw, ch)
             try:
-                sc = min(cw / remote_w, ch / remote_h)
-                dw, dh = max(int(remote_w * sc), 1), max(int(remote_h * sc), 1)
-                g.update(ox=(cw - dw) // 2, oy=(ch - dh) // 2, dw=dw, dh=dh)
-                g["photo"] = ImageTk.PhotoImage(rs if rs is not None and rs.size == (dw, dh) else im.resize((dw, dh), Image.BILINEAR))
-                if g["item"] is None:
-                    g["item"] = canvas.create_image(g["ox"], g["oy"], anchor="nw", image=g["photo"])
+                if im.size != (dw, dh): im = im.resize((dw, dh), Image.BILINEAR)
+                ph = g["photo"]
+                if ph is not None and ph.width() == dw and ph.height() == dh:
+                    ph.paste(im)  # ใช้ภาพ Tk เดิม ไม่สร้างใหม่ทุกเฟรม
                 else:
-                    canvas.coords(g["item"], g["ox"], g["oy"])
-                    canvas.itemconfig(g["item"], image=g["photo"])
+                    g["photo"] = ImageTk.PhotoImage(im)
+                    if g["item"] is None:
+                        g["item"] = canvas.create_image(g["ox"], g["oy"], anchor="nw", image=g["photo"])
+                    else:
+                        canvas.itemconfig(g["item"], image=g["photo"])
+                canvas.coords(g["item"], g["ox"], g["oy"])
             except Exception as e:
                 log_err(e)
         if alive[0]:
-            win.after(12, poll)
+            win.after(8, poll)
         else:
             win.title(f"ตัดการเชื่อมต่อ: {ip}")
             lbl_v.config(text=f"● ตัดการเชื่อมต่อ {ip}", fg="#ff6b6b")
@@ -899,6 +980,7 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel=""):
             log_err(e)
     canvas.focus_set()
     threading.Thread(target=recv_frames, daemon=True).start()
+    threading.Thread(target=render_loop, daemon=True).start()
     poll()
 
 # ---------- GUI ----------
@@ -1047,12 +1129,12 @@ def main():
         w.resizable(False, False)
         tk.Label(w, text="เลือกคุณภาพภาพ", bg=PANEL, fg=TEXT, font=("Tahoma", 17, "bold")).pack(anchor="w", padx=20, pady=(16, 2))
         tk.Label(w, text=f"เชื่อมต่อกับ {who}", bg=PANEL, fg=SUBTEXT).pack(anchor="w", padx=20, pady=(0, 8))
-        v = tk.IntVar(value=2)
+        v = tk.IntVar(value=cfg.get("quality", 2))  # จำค่าที่เลือกครั้งก่อน
         for i, txt in enumerate(("ประหยัด  720p 30fps", "กลาง  1080p 30fps", "สูงสุด  1080p 60fps (ลื่นสุด ปรับตามเน็ตอัตโนมัติ)")):
             tk.Radiobutton(w, text=txt, variable=v, value=i, bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL,
                            activeforeground=TEXT, anchor="w").pack(fill="x", padx=20, pady=2)
         def ok():
-            q = v.get(); w.destroy(); go(q)
+            q = v.get(); cfg["quality"] = q; save_config(cfg); w.destroy(); go(q)
         row = tk.Frame(w, bg=PANEL); row.pack(fill="x", padx=20, pady=16)
         ttk.Button(row, text="เชื่อมต่อ", style="Accent.TButton", command=ok).pack(side="right")
         ttk.Button(row, text="ยกเลิก", style="Ghost.TButton", command=w.destroy).pack(side="right", padx=8)
