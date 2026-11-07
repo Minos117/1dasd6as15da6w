@@ -1,7 +1,7 @@
 ﻿[Setup]
 AppId={{7C3E1B52-9A4D-4F0E-8B6A-2D5F31C9E7A4}
 AppName=ZAIA Remote Desktop
-AppVersion=1.12.0
+AppVersion=1.13.0
 DefaultDirName={autopf}\ZaiaRemote
 DefaultGroupName=ZAIA Remote Desktop
 SetupIconFile=zaia.ico
