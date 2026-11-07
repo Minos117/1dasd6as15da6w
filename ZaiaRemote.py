@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import sys, os, json, socket, threading, time, io, ctypes, subprocess, winreg, re, ipaddress, uuid, urllib.request, zlib, queue, hashlib
+import sys, os, json, socket, threading, time, io, ctypes, subprocess, winreg, re, ipaddress, uuid, urllib.request, zlib, queue, hashlib, struct
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from PIL import Image, ImageGrab, ImageChops
@@ -15,14 +15,16 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "1.10.0"
+APP_VER = "1.11.0"
 SETUP_REV = 1  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_ZT_NETWORK_ID = "b103a835d26ef7ce"
 PORT = 47101
-JPEG_Q = 60
-JPEG_MIN, JPEG_MAX = 35, 82  # ปรับคุณภาพ JPEG อัตโนมัติตามความเร็วเน็ต
-QUALITY = [(1280, 30, "720p 30fps"), (1920, 30, "1080p 30fps"), (1920, 60, "1080p 60fps")]  # (กว้างสูงสุด, fps, ชื่อ)
+JPEG_Q = 75  # ใช้เฉพาะสำรองเมื่อไม่มี H.264; ค่าคงที่ ไม่ปรับเอง
+DOC_JPEG_Q = 80  # โหมดเอกสาร: ส่วนที่เปลี่ยนมากทั้งหน้า (เลื่อนจอ) ส่งเป็น JPEG แล้วจะส่งซ้ำแบบไม่สูญเสียเมื่อจอนิ่ง
+DOC_LOSSY_AREA = 300000  # พิกเซล: กล่องที่เปลี่ยนใหญ่กว่านี้ส่งเป็น JPEG ที่เล็กกว่านี้ส่ง PNG (ตัวอักษรคมเป๊ะ)
+H264_KBPS = {0: 4000, 1: 8000, 2: 12000}  # บิตเรตคงที่ต่อระดับคุณภาพ ที่ผู้ใช้เลือกเอง
+QUALITY = [(1280, 30, "720p 30fps"), (1920, 30, "1080p 30fps"), (1920, 60, "1080p 60fps"), (0, 15, "เอกสาร (คมชัด)")]  # (กว้างสูงสุด, fps, ชื่อ); ตัวที่ 3 = โหมดเอกสาร ไม่ย่อภาพ
 CTRL_PORT = 47102
 APPDIR = os.path.join(os.environ["APPDATA"], "ZaiaRemote")
 CONFIG_PATH = os.path.join(APPDIR, "config.json")
@@ -566,9 +568,6 @@ def send_file_to_client(client, lock, path):  # แพ็กเก็ตไฟ�
         try: pkt(b"X", f"ส่งไฟล์ไม่สำเร็จ: {e}".encode("utf-8"))
         except Exception: pass
 
-# (สเกลภาพ, บิตเรต kbps) เรียงจากดีสุดไปประหยัดสุด ขยับทีละขั้น ไม่เกินทุก 1.5 วินาที (ทุกครั้งที่ขยับ encoder ถูกสร้างใหม่ = มีเฟรมเต็มหนึ่งเฟรม)
-LEVELS = [(1.0, 12000), (1.0, 8000), (1.0, 5000), (0.75, 3500), (0.75, 2500), (0.5, 1800), (0.5, 1000)]
-
 def bgra_to_vf(size, b):  # BGRA -> VideoFrame ตรง ๆ (เร็วกว่าผ่าน PIL หลายเท่า); บางความกว้าง (เช่น 1366) แถวถูกเติมให้ยาวขึ้น ต้องก๊อปทีละแถว
     w, h = size
     vf = av.VideoFrame(w, h, "bgra")
@@ -583,13 +582,10 @@ def bgra_to_vf(size, b):  # BGRA -> VideoFrame ตรง ๆ (เร็วกว
         pl.update(buf)
     return vf
 
-def stream_h264(client, grab, gone, lock, maxw, fps):
+def stream_h264(client, grab, gone, lock, maxw, fps, br):  # คุณภาพคงที่ตามที่ผู้ใช้เลือก ไม่ปรับเองระหว่างใช้งาน
     from fractions import Fraction
     raw = getattr(grab, "raw", None)
     enc, size, n = None, None, 0
-    lv = 1  # เริ่มที่ 8 Mbps แล้วค่อยขยับขึ้นเมื่อเน็ตไหว ไม่เริ่มสุดแล้วค้าง
-    ema_enc = ema_send = 0.0
-    up_wait, t_change, t_bad, t_up = 6.0, 0.0, time.time(), 0.0
     iv = 1 / fps
     nxt = time.time()
     prev_sig = None
@@ -604,45 +600,87 @@ def stream_h264(client, grab, gone, lock, maxw, fps):
         if sg is not None and sg == prev_sig:
             time.sleep(0.004); continue
         prev_sig = sg
-        t_cap = time.time()
-        scl, br = LEVELS[lv]
-        mw = max(min(int(maxw * scl), sz[0]) // 2 * 2, 320)
+        mw = max(min(maxw, sz[0]) // 2 * 2, 320)
         mh = max(sz[1] * mw // sz[0] // 2 * 2, 240)
         if enc is None or size != (mw, mh):
             enc = av.CodecContext.create("libx264", "w")
             enc.width, enc.height, enc.pix_fmt = mw, mh, "yuv420p"
             enc.framerate, enc.time_base = fps, Fraction(1, fps)
-            # intra-refresh: ไม่มีเฟรมเต็ม (I-frame) ก้อนใหญ่ทุก 2 วินาที ที่ทำให้ภาพสะดุดบนเน็ตช้า / vbv-bufsize เล็ก = ขนาดแต่ละเฟรมไม่พุ่ง
             enc.options = {"preset": "ultrafast", "tune": "zerolatency", "bf": "0",
-                           "x264-params": f"crf=23:keyint={fps * 2}:intra-refresh=1:vbv-maxrate={br}:vbv-bufsize={max(br // fps * 3, 200)}"}
+                           "x264-params": f"crf=20:keyint={fps * 2}:intra-refresh=1:vbv-maxrate={br}:vbv-bufsize={max(br // 4, 200)}"}
             enc.open()
             size = (mw, mh)
         vf = bgra_to_vf(sz, b) if raw else av.VideoFrame.from_image(im.convert("RGB"))
         vf = vf.reformat(width=mw, height=mh, format="yuv420p")
         vf.pts = n; n += 1
-        pks = [bytes(pk) for pk in enc.encode(vf)]
-        t_enc = time.time()
-        for d in pks:
+        for pk in enc.encode(vf):
+            d = bytes(pk)
             with lock:  # ส่งตรง ไม่ทิ้งเฟรม (P-frame ทิ้งไม่ได้) เน็ตช้า TCP จะชะลอรอบจับภาพเอง
                 client.sendall((len(d) | 0x40000000).to_bytes(4, "little") + d)
-        t_end = time.time()
-        ema_enc = ema_enc * 0.8 + (t_enc - t_cap) * 0.2    # CPU: แปลง+เข้ารหัส (ไม่รวมเวลาจับภาพ)
-        ema_send = ema_send * 0.8 + (t_end - t_enc) * 0.2  # เน็ต: เวลาที่ sendall ค้างรอเพราะส่งไม่ทัน
-        good = ema_send < iv * 0.3 and ema_enc < iv * 0.6
-        if not good: t_bad = t_end
-        if t_end - t_change > 1.5:
-            if (ema_send > iv * 0.9 or ema_enc > iv * 1.2) and lv < len(LEVELS) - 1:
-                if t_end - t_up < 20: up_wait = min(up_wait * 2, 60)  # เพิ่งขยับขึ้นแล้วตกลงมาอีก -> รอนานขึ้นก่อนลองใหม่ กันภาพแกว่ง
-                lv += 1; enc = None; t_change = t_bad = t_end
-            elif good and lv > 0 and t_end - t_bad > up_wait:
-                lv -= 1; enc = None; t_change = t_bad = t_up = t_end
-        nxt += iv  # นับจังหวะแบบสะสม ไม่ใช่ sleep เท่ากันทุกรอบ (กันเฟรมเรตค่อย ๆ เพี้ยน)
+        nxt += iv  # นับจังหวะแบบสะสม ไม่ใช่ sleep เท่ากันทุกรอบ
+        now = time.time()
+        if nxt > now: time.sleep(nxt - now)
+        elif now - nxt > iv: nxt = now
+
+def stream_rects(client, grab, gone, lock, fps):  # โหมดเอกสาร/Excel: ส่งเฉพาะกรอบที่เปลี่ยน ขนาดจริง ไม่ย่อ ไม่ผ่านการบีบแบบ video
+    raw = getattr(grab, "raw", None)
+    iv = 1 / fps
+    prev, prev_sig, lossy = None, None, None
+    last_change = nxt = time.time()
+
+    def send(box, img, fmt):  # fmt 0 = PNG (ไม่สูญเสีย), 1 = JPEG 4:4:4 (ตัวอักษรสีไม่เพี้ยน)
+        buf = io.BytesIO()
+        if fmt == 0: img.save(buf, "PNG", compress_level=1)
+        else: img.save(buf, "JPEG", quality=DOC_JPEG_Q, subsampling=0)
+        d = struct.pack("<HHHHB", box[0], box[1], box[2] - box[0], box[3] - box[1], fmt) + buf.getvalue()
+        with lock:
+            client.sendall((len(d) | 0x20000000).to_bytes(4, "little") + d)
+
+    while not gone.is_set():
+        try:
+            if raw: sz, b = raw()
+            else:
+                cur = grab(); sz = cur.size
+        except Exception:
+            time.sleep(1); continue
+        sg = getattr(grab, "sig", None)
+        now = time.time()
+        if sg is not None and sg == prev_sig:  # จอไม่เปลี่ยน
+            if lossy and now - last_change > 0.4:  # จอนิ่งแล้ว -> ส่งส่วนที่เคยบีบแบบ JPEG ซ้ำแบบคมชัดไม่สูญเสีย
+                send(lossy, prev.crop(lossy), 0)
+                lossy = None
+            time.sleep(0.01)
+            continue
+        prev_sig, last_change = sg, now
+        if raw: cur = Image.frombytes("RGB", sz, b, "raw", "BGRX")
+        if prev is None or prev.size != cur.size:
+            rects = [(0, 0, cur.width, cur.height)]
+        else:
+            diff = ImageChops.difference(prev, cur)
+            rects = []
+            for y in range(0, cur.height, 64):  # หาขอบเขตที่เปลี่ยนทีละแถบ 64 แถว แล้วรวมแถบที่ติดกัน
+                bb = diff.crop((0, y, cur.width, min(y + 64, cur.height))).getbbox()
+                if not bb: continue
+                r = (bb[0], y + bb[1], bb[2], y + bb[3])
+                if rects and rects[-1][3] == y:
+                    q = rects[-1]; r = (min(q[0], r[0]), q[1], max(q[2], r[2]), r[3]); rects[-1] = r
+                else:
+                    rects.append(r)
+        for r in rects:
+            if (r[2] - r[0]) * (r[3] - r[1]) > DOC_LOSSY_AREA:
+                send(r, cur.crop(r), 1)
+                lossy = r if lossy is None else (min(lossy[0], r[0]), min(lossy[1], r[1]), max(lossy[2], r[2]), max(lossy[3], r[3]))
+            else:
+                send(r, cur.crop(r), 0)
+        prev = cur
+        nxt += iv
         now = time.time()
         if nxt > now: time.sleep(nxt - now)
         elif now - nxt > iv: nxt = now
 
 def handle_control_client(client, q=1, h264=False):
     maxw, fps, _ = QUALITY[q]
+    if maxw == 0: maxw = 1 << 16
     lock = threading.Lock()
     try:
         client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -652,9 +690,12 @@ def handle_control_client(client, q=1, h264=False):
         client.sendall(w.to_bytes(4, "little") + h.to_bytes(4, "little"))
         gone = threading.Event()
         threading.Thread(target=apply_input_loop, args=(client, gone, lock), daemon=True).start()
+        if q == 3:  # โหมดเอกสาร
+            stream_rects(client, grab, gone, lock, fps)
+            return
         if h264:
             try:
-                stream_h264(client, grab, gone, lock, maxw, fps)
+                stream_h264(client, grab, gone, lock, maxw, fps, H264_KBPS[q])
                 return
             except Exception as e:  # encoder ใช้ไม่ได้ (ไม่มี libx264) -> สาย TCP อาจเสียแล้ว ปิดแล้วให้ฝั่งดูต่อใหม่ (ได้ JPEG)
                 log_err(e)
@@ -674,7 +715,7 @@ def handle_control_client(client, q=1, h264=False):
                 log_err(e)
                 gone.set()
         threading.Thread(target=sender, daemon=True).start()
-        prev, prev_sig, qual, scl, iv = None, None, JPEG_Q, 1.0, 1 / fps
+        prev, prev_sig, qual, scl, iv = None, None, JPEG_Q, 1.0, 1 / fps  # คุณภาพคงที่ ไม่ปรับเอง
         while not gone.is_set():
             t0 = time.time()
             try:
@@ -703,13 +744,6 @@ def handle_control_client(client, q=1, h264=False):
                 try: slot.get_nowait()
                 except queue.Empty: pass
                 slot.put_nowait(data)
-            s_t = st["send"]  # ส่งช้ากว่าเฟรมเรต -> ลดคุณภาพก่อน แล้วลดขนาด / ส่งเร็ว -> คืนขนาดก่อน แล้วเพิ่มคุณภาพ
-            if s_t > iv * 1.3:
-                if qual > JPEG_MIN: qual = max(JPEG_MIN, qual - 7)
-                elif scl > 0.5: scl = max(0.5, scl - 0.15)
-            elif s_t < iv * 0.5:
-                if scl < 1.0: scl = min(1.0, scl + 0.05)
-                elif qual < JPEG_MAX: qual = min(JPEG_MAX, qual + 2)
             dt = time.time() - t0
             if dt < iv:
                 time.sleep(iv - dt)
@@ -830,9 +864,9 @@ def open_viewer(ips, q=1):
     rw = int.from_bytes(hdr[0:4], "little")
     rh = int.from_bytes(hdr[4:8], "little")
     notify(f"เชื่อมต่อ {ip} สำเร็จ")
-    ROOT[0].after(0, lambda: viewer_window(sock, ip, rw, rh, QUALITY[q][2]))
+    ROOT[0].after(0, lambda: viewer_window(sock, ip, rw, rh, QUALITY[q][2], q == 3))
 
-def viewer_window(sock, ip, remote_w, remote_h, qlabel=""):
+def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False):
     from PIL import ImageTk
     win = tk.Toplevel(ROOT[0])
     win.title(f"ควบคุม: {ip}   (F11 = เต็มจอ)")
@@ -869,6 +903,8 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel=""):
             say(d.decode("utf-8", "replace"), "#ff6b6b")
 
     dec = [None]
+    fb, fb_lock = [None], threading.Lock()
+    flt = Image.LANCZOS if sharp else Image.BILINEAR  # โหมดเอกสาร: ย่อภาพให้คมกว่า (ช้ากว่าเล็กน้อยแต่อัปเดตไม่ถี่)
     slot = {"f": None}
     ev = threading.Event()
 
@@ -878,7 +914,7 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel=""):
                 lb = recv_exact(sock, 4)
                 if not lb: break
                 n = int.from_bytes(lb, "little")
-                data = recv_exact(sock, n & 0x3FFFFFFF)
+                data = recv_exact(sock, n & 0x1FFFFFFF)
                 if not data: break
                 if n & 0x80000000:
                     on_file_packet(data)
@@ -888,6 +924,14 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel=""):
                     fr = dec[0].decode(av.Packet(data))
                     if not fr: continue
                     slot["f"] = fr[-1]
+                elif n & 0x20000000:  # โหมดเอกสาร: กรอบที่เปลี่ยน (x,y,w,h,ชนิด) วางลงภาพเต็มที่เก็บไว้
+                    x, y, _w, _h, _f = struct.unpack("<HHHHB", data[:9])
+                    im = Image.open(io.BytesIO(data[9:]))
+                    im.load()
+                    with fb_lock:
+                        if fb[0] is None: fb[0] = Image.new("RGB", (remote_w, remote_h))
+                        fb[0].paste(im if im.mode == "RGB" else im.convert("RGB"), (x, y))
+                    slot["f"] = fb[0]
                 else:
                     im = Image.open(io.BytesIO(data))
                     im.load()
@@ -913,7 +957,8 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel=""):
             dims = want
             try:
                 if isinstance(last, Image.Image):
-                    im = last.resize(want, Image.BILINEAR) if want and want[0] > 1 else last
+                    with fb_lock:  # ภาพเต็มของโหมดเอกสารถูกแก้ในเธรดรับ ต้องล็อกตอนย่อ
+                        im = last.resize(want, flt) if want and want[0] > 1 else last.copy()
                 elif want and want[0] > 1:
                     im = last.reformat(width=want[0], height=want[1], format="rgb24").to_image()
                 else:
@@ -931,7 +976,7 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel=""):
         latest["d"] = None
         if im is not None:
             try:
-                if im.size != (dw, dh): im = im.resize((dw, dh), Image.BILINEAR)
+                if im.size != (dw, dh): im = im.resize((dw, dh), flt)
                 ph = g["photo"]
                 if ph is not None and ph.width() == dw and ph.height() == dh:
                     ph.paste(im)  # ใช้ภาพ Tk เดิม ไม่สร้างใหม่ทุกเฟรม
@@ -1198,9 +1243,10 @@ def main():
         w.resizable(False, False)
         tk.Label(w, text="เลือกคุณภาพภาพ", bg=PANEL, fg=TEXT, font=("Tahoma", 17, "bold")).pack(anchor="w", padx=20, pady=(16, 2))
         tk.Label(w, text=f"เชื่อมต่อกับ {who}", bg=PANEL, fg=SUBTEXT).pack(anchor="w", padx=20, pady=(0, 8))
-        v = tk.IntVar(value=cfg.get("quality", 2))  # จำค่าที่เลือกครั้งก่อน
-        for i, txt in enumerate(("ประหยัด  720p 30fps", "กลาง  1080p 30fps", "สูงสุด  1080p 60fps (ลื่นสุด ปรับตามเน็ตอัตโนมัติ)")):
-            tk.Radiobutton(w, text=txt, variable=v, value=i, bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL,
+        v = tk.IntVar(value=cfg.get("quality", 3))  # จำค่าที่เลือกครั้งก่อน
+        for val, txt in ((3, "เอกสาร / Excel  คมชัด ไม่ย่อภาพ (แนะนำสำหรับงานเอกสาร)"), (0, "ประหยัด  720p 30fps (วิดีโอ)"),
+                         (1, "กลาง  1080p 30fps (วิดีโอ)"), (2, "สูงสุด  1080p 60fps (วิดีโอ ใช้เน็ตและเครื่องแรง)")):
+            tk.Radiobutton(w, text=txt, variable=v, value=val, bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL,
                            activeforeground=TEXT, anchor="w").pack(fill="x", padx=20, pady=2)
         def ok():
             q = v.get(); cfg["quality"] = q; save_config(cfg); w.destroy(); go(q)
