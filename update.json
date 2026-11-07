@@ -1,7 +1,7 @@
 {
- "version": "1.11.0",
+ "version": "1.12.0",
  "files": {
-  "ZaiaRemote.py": "b19700ec089230f1a60622fec483983faccfd07df5a4eb5cb1c1f8773aa41ae9",
+  "ZaiaRemote.py": "823a4fdf3c792b0da244426f8e16cb411988e8955e30fcc8da5d6cf99cf3df43",
   "ZaiaRemote.exe": "64e847f2a0b8879607025e64811f510184470a154c718ec6298bec1a7fb2e626",
   "zaia.ico": "058003c00b5fb730940df379d7cd4a5e1c0e2421099eafdbab0af6559b6d7086",
   "zaia_logo.png": "5922940a303e6378b07997169d2a06d2a8227b3a1c15ec511b5afab6f5a590de"

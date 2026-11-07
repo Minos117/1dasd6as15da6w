@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import sys, os, json, socket, threading, time, io, ctypes, subprocess, winreg, re, ipaddress, uuid, urllib.request, zlib, queue, hashlib, struct
+import sys, os, json, socket, threading, time, io, ctypes, subprocess, winreg, re, ipaddress, uuid, urllib.request, zlib, queue, hashlib, struct, ntpath
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from PIL import Image, ImageGrab, ImageChops
@@ -15,7 +15,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "1.11.0"
+APP_VER = "1.12.0"
 SETUP_REV = 1  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_ZT_NETWORK_ID = "b103a835d26ef7ce"
@@ -547,19 +547,71 @@ def make_grabber():
         log_err(e)
         return ImageGrab.grab
 
-def send_file_to_client(client, lock, path):  # แพ็กเก็ตไฟล์ = ความยาว|0x80000000 แล้วตามด้วย N ชื่อ / D ข้อมูล / E จบ / X ข้อผิดพลาด
+def blocked(p):  # โฟลเดอร์ระบบ ไม่ให้เรียกดู/ดึงไฟล์
+    p = os.path.abspath(p).lower()
+    for k in ("WINDIR", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+        v = os.environ.get(k)
+        if v and (p == os.path.abspath(v).lower() or p.startswith(os.path.abspath(v).lower() + os.sep)): return True
+    return False
+
+def list_dir(path):  # path ว่าง = ราก (ไดรฟ์ + Desktop/Documents/Downloads ของผู้ใช้)
+    if not path:
+        items, home = [], os.path.expanduser("~")
+        for nm in ("Desktop", "Documents", "Downloads"):
+            q = os.path.join(home, nm)
+            if os.path.isdir(q): items.append({"n": nm, "p": q, "d": True, "s": 0, "m": 0})
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+        for i in range(26):
+            if mask >> i & 1:
+                q = f"{chr(65 + i)}:\\"
+                items.append({"n": q, "p": q, "d": True, "s": 0, "m": 0})
+        return {"path": "", "parent": None, "items": items}
+    ap = os.path.abspath(path)
+    if blocked(ap): raise PermissionError("โฟลเดอร์ระบบ (Windows / Program Files / ProgramData) ไม่เปิดให้เรียกดู")
+    items = []
+    with os.scandir(ap) as it:
+        for e in it:
+            try:
+                st = e.stat(follow_symlinks=False)
+                if getattr(st, "st_file_attributes", 0) & 6: continue  # ไฟล์ซ่อน/ระบบ (เช่น desktop.ini)
+                d = e.is_dir(follow_symlinks=False)
+                items.append({"n": e.name, "d": d, "s": 0 if d else st.st_size, "m": int(st.st_mtime)})
+            except OSError:
+                continue
+    items.sort(key=lambda x: (not x["d"], x["n"].lower()))
+    par = os.path.dirname(ap)
+    return {"path": ap, "parent": "" if par == ap else par, "items": items[:4000]}
+
+def send_listing(client, lock, path):
+    try:
+        try: body = json.dumps(list_dir(path), ensure_ascii=False).encode("utf-8")
+        except Exception as e: body = json.dumps({"path": path, "error": str(e)}, ensure_ascii=False).encode("utf-8")
+        p = b"L" + body
+        with lock:
+            client.sendall((len(p) | 0x80000000).to_bytes(4, "little") + p)
+    except Exception as e:
+        log_err(e)
+
+def send_file_to_client(client, lock, path, cancel=None):  # แพ็กเก็ตไฟล์ = ความยาว|0x80000000 แล้วตามด้วย S ขนาด / N ชื่อ / D ข้อมูล / E จบ / X ข้อผิดพลาด / L รายการไฟล์
     def pkt(t, d=b""):
         p = t + d
         with lock:
             client.sendall((len(p) | 0x80000000).to_bytes(4, "little") + p)
     try:
+        if blocked(path):
+            pkt(b"X", "โฟลเดอร์ระบบ ดึงไฟล์ไม่ได้".encode("utf-8"))
+            return
         if not os.path.isfile(path):
             pkt(b"X", f"ไม่พบไฟล์บนเครื่องปลายทาง: {path}".encode("utf-8"))
             return
+        pkt(b"S", os.path.getsize(path).to_bytes(8, "little"))
         pkt(b"N", os.path.basename(path).encode("utf-8"))
         with open(path, "rb") as f:
             while True:
-                b = f.read(65536)
+                if cancel is not None and cancel.is_set():
+                    pkt(b"X", "ยกเลิกการดึงไฟล์แล้ว".encode("utf-8"))
+                    return
+                b = f.read(131072)
                 if not b: break
                 pkt(b"D", b)
         pkt(b"E")
@@ -754,7 +806,8 @@ def handle_control_client(client, q=1, h264=False):
         except Exception: pass
 
 def apply_input_loop(client, gone, lock):
-    fh, rem = None, 0
+    fh, rem, fp = None, 0, None
+    cancel = threading.Event()
     try:
         while True:
             t = recv_exact(client, 1)
@@ -788,7 +841,8 @@ def apply_input_loop(client, gone, lock):
                 name = recv_exact(client, n).decode("utf-8", "replace")
                 rem = int.from_bytes(recv_exact(client, 8), "little")
                 if fh: fh.close()
-                fh = open(unique_path(name), "wb")
+                fp = unique_path(name)
+                fh = open(fp, "wb")
                 if rem == 0:
                     fh.close(); fh = None
             elif t == "C":  # ข้อมูลไฟล์ทีละก้อน
@@ -802,7 +856,19 @@ def apply_input_loop(client, gone, lock):
             elif t == "G":  # ขอดึงไฟล์จากเครื่องนี้
                 n = int.from_bytes(recv_exact(client, 2), "little")
                 path = recv_exact(client, n).decode("utf-8", "replace")
-                threading.Thread(target=send_file_to_client, args=(client, lock, path), daemon=True).start()
+                cancel.clear()
+                threading.Thread(target=send_file_to_client, args=(client, lock, path, cancel), daemon=True).start()
+            elif t == "Z":  # ขอยกเลิกการดึงไฟล์
+                cancel.set()
+            elif t == "Y":  # ยกเลิกการส่งไฟล์เข้ามา: ลบไฟล์ที่ได้ไม่ครบ
+                if fh:
+                    fh.close(); fh = None
+                    try: os.remove(fp)
+                    except OSError: pass
+            elif t == "L":  # ขอรายการไฟล์ในโฟลเดอร์
+                n = int.from_bytes(recv_exact(client, 2), "little")
+                path = recv_exact(client, n).decode("utf-8", "replace")
+                threading.Thread(target=send_listing, args=(client, lock, path), daemon=True).start()
     except Exception as e:
         log_err(e)
     finally:
@@ -882,25 +948,96 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False):
     alive = [True]
     fs = [False]
 
-    rf = {"fh": None, "path": ""}
+    rf = {"fh": None, "path": "", "size": 0, "got": 0, "t0": 0.0, "last": 0.0, "name": ""}
     slock = threading.Lock()
+    xf = {"w": None}
+    cancel_up = threading.Event()
+    pull = {"q": [], "n": 0, "i": 0}
+    br = {"fill": None}
 
     def say(text, color="#3ddc84"):
         win.after(0, lambda: lbl_v.config(text=text, fg=color))
 
+    def fmt_size(n):
+        for u in ("B", "KB", "MB", "GB"):
+            if n < 1024 or u == "GB": return f"{n:.0f} B" if u == "B" else f"{n:.1f} {u}"
+            n /= 1024
+
+    def xfer_ui(title, done, total, t0):  # หน้าต่างความคืบหน้า (เรียกในเธรด Tk)
+        if not (xf["w"] and xf["w"].winfo_exists()):
+            w = tk.Toplevel(win)
+            w.title("โอนไฟล์"); w.configure(bg="#101a2e"); w.resizable(False, False); w.transient(win)
+            lbl = tk.Label(w, bg="#101a2e", fg="#e7f0ff", anchor="w", width=62); lbl.pack(padx=14, pady=(12, 4))
+            bar = ttk.Progressbar(w, length=440, maximum=100); bar.pack(padx=14)
+            info = tk.Label(w, bg="#101a2e", fg="#8fa3c4", anchor="w", width=62); info.pack(padx=14, pady=4)
+            ttk.Button(w, text="ยกเลิก", command=xfer_cancel).pack(pady=(4, 12))
+            w.protocol("WM_DELETE_WINDOW", xfer_cancel)
+            xf.update(w=w, lbl=lbl, bar=bar, info=info)
+        pct = 100 * done / total if total else 0
+        xf["lbl"].config(text=title)
+        xf["bar"]["value"] = pct
+        xf["info"].config(text=f"{fmt_size(done)} / {fmt_size(total)}  ({pct:.0f}%)   {fmt_size(done / max(time.time() - t0, 0.001))}/วินาที")
+
+    def xfer_close():
+        if xf["w"] and xf["w"].winfo_exists(): xf["w"].destroy()
+        xf["w"] = None
+
+    def xfer_cancel():
+        cancel_up.set()
+        pull["q"].clear()
+        send(b"Z"); send(b"Y")
+        xfer_close()
+        say("ยกเลิกการโอนไฟล์แล้ว", "#ff6b6b")
+
+    def pull_next():
+        if pull["q"]:
+            pull["i"] += 1
+            pb = pull["q"].pop(0).encode("utf-8")
+            send(b"G", len(pb).to_bytes(2, "little"), pb)
+        else:
+            win.after(0, xfer_close)
+            if pull["n"]:
+                say(f"ดึงไฟล์เสร็จ {pull['n']} ไฟล์ (อยู่บนเดสก์ท็อปเครื่องนี้)")
+                pull["n"] = 0
+
+    def start_pull(paths):  # ดึงทีละไฟล์ตามลำดับ (ฝั่งนี้ส่งคำขอถัดไปเมื่อไฟล์ก่อนหน้าเสร็จ)
+        if rf["fh"] or pull["q"]:
+            say("กำลังโอนไฟล์อยู่ รอให้เสร็จก่อน", "#ff6b6b")
+            return
+        pull.update(q=list(paths), n=len(paths), i=0)
+        pull_next()
+
     def on_file_packet(p):
         t, d = p[:1], p[1:]
-        if t == b"N":
+        if t == b"S":
+            rf["size"] = int.from_bytes(d[:8], "little")
+        elif t == b"N":
             if rf["fh"]: rf["fh"].close()
             rf["path"] = unique_path(d.decode("utf-8", "replace"))
             rf["fh"] = open(rf["path"], "wb")
+            rf.update(got=0, t0=time.time(), last=0.0, name=os.path.basename(rf["path"]))
         elif t == b"D" and rf["fh"]:
             rf["fh"].write(d)
+            rf["got"] += len(d)
+            if time.time() - rf["last"] > 0.12:
+                rf["last"] = time.time()
+                title, got, size, t0 = f"ดึงไฟล์ {pull['i']}/{pull['n']}: {rf['name']}", rf["got"], rf["size"], rf["t0"]
+                win.after(0, lambda: xfer_ui(title, got, size, t0))
         elif t == b"E" and rf["fh"]:
             rf["fh"].close(); rf["fh"] = None
             say(f"รับไฟล์แล้ว: {rf['path']}")
+            pull_next()
         elif t == b"X":
+            if rf["fh"]:  # ยกเลิก/ผิดพลาดกลางทาง ลบไฟล์ที่ได้ไม่ครบ
+                rf["fh"].close(); rf["fh"] = None
+                try: os.remove(rf["path"])
+                except OSError: pass
             say(d.decode("utf-8", "replace"), "#ff6b6b")
+            pull_next()
+        elif t == b"L" and br["fill"]:
+            try: info = json.loads(d.decode("utf-8"))
+            except ValueError: return
+            win.after(0, lambda: br["fill"](info))
 
     dec = [None]
     fb, fb_lock = [None], threading.Lock()
@@ -1010,22 +1147,30 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False):
     def send_files(paths):
         paths = [x for x in paths if os.path.isfile(x)]
         if not paths: return
+        cancel_up.clear()
         def run():
-            for x in paths:
-                name = os.path.basename(x)
-                say(f"กำลังส่ง {name} ...", "#2fa8ff")
+            for k, x in enumerate(paths, 1):
+                name, size = os.path.basename(x), os.path.getsize(x)
+                t0, last, done = time.time(), 0.0, 0
                 try:
                     nb = name.encode("utf-8")
-                    send(b"F", len(nb).to_bytes(2, "little"), nb, os.path.getsize(x).to_bytes(8, "little"))
+                    send(b"F", len(nb).to_bytes(2, "little"), nb, size.to_bytes(8, "little"))
                     with open(x, "rb") as f:
-                        while alive[0]:
-                            b = f.read(65536)
+                        while alive[0] and not cancel_up.is_set():
+                            b = f.read(131072)
                             if not b: break
                             send(b"C", len(b).to_bytes(4, "little"), b)
+                            done += len(b)
+                            if time.time() - last > 0.12:
+                                last = time.time()
+                                win.after(0, lambda d=done: xfer_ui(f"ส่งไฟล์ {k}/{len(paths)}: {name}", d, size, t0))
                 except Exception as e:
                     log_err(e)
                     say(f"ส่ง {name} ไม่สำเร็จ: {e}", "#ff6b6b")
+                    win.after(0, xfer_close)
                     return
+                if cancel_up.is_set(): return
+            win.after(0, xfer_close)
             say(f"ส่งไฟล์แล้ว {len(paths)} ไฟล์ (อยู่บนเดสก์ท็อปเครื่องปลายทาง)")
         threading.Thread(target=run, daemon=True).start()
 
@@ -1033,12 +1178,61 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False):
         ps = filedialog.askopenfilenames(parent=win)
         if ps: send_files(list(ps))
 
-    def pick_pull():
-        v = simpledialog.askstring("ดึงไฟล์", "ใส่ที่อยู่ไฟล์บนเครื่องปลายทาง\n(เช่น C:\\Users\\Public\\file.pdf) ไฟล์จะมาอยู่บนเดสก์ท็อปเครื่องนี้", parent=win)
-        if v and v.strip():
-            pb = v.strip().strip('"').encode("utf-8")
-            send(b"G", len(pb).to_bytes(2, "little"), pb)
-            say("ขอไฟล์จากเครื่องปลายทางแล้ว ...", "#2fa8ff")
+    def open_browser():  # เรียกดูไฟล์ในเครื่องปลายทาง
+        b = tk.Toplevel(win)
+        b.title("เรียกดูไฟล์ในเครื่องปลายทาง"); b.geometry("700x500"); b.configure(bg="#101a2e")
+        cur = {"parent": None, "items": {}}
+        top = tk.Frame(b, bg="#101a2e"); top.pack(fill="x", padx=10, pady=8)
+        lbl = tk.Label(top, text="กำลังโหลด ...", bg="#101a2e", fg="#2fa8ff", anchor="w")
+        def go(path):
+            lbl.config(text="กำลังโหลด ...", fg="#2fa8ff")
+            pb = path.encode("utf-8")
+            send(b"L", len(pb).to_bytes(2, "little"), pb)
+        ttk.Button(top, text="↑ ขึ้นไป", style="Ghost.TButton", command=lambda: go(cur["parent"] or "")).pack(side="left")
+        lbl.pack(side="left", padx=10, fill="x", expand=True)
+        bot = tk.Frame(b, bg="#101a2e"); bot.pack(side="bottom", fill="x", padx=10, pady=8)
+        mid = tk.Frame(b, bg="#101a2e"); mid.pack(fill="both", expand=True, padx=10)
+        tree = ttk.Treeview(mid, columns=("size", "mod"), selectmode="extended")
+        tree.heading("#0", text="ชื่อ"); tree.heading("size", text="ขนาด"); tree.heading("mod", text="แก้ไขล่าสุด")
+        tree.column("#0", width=360); tree.column("size", width=90, anchor="e"); tree.column("mod", width=150, anchor="center")
+        sb = ttk.Scrollbar(mid, orient="vertical", command=tree.yview); tree.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y"); tree.pack(side="left", fill="both", expand=True)
+
+        def fill(info):
+            if not b.winfo_exists(): return
+            if info.get("error"):
+                lbl.config(text=info["error"], fg="#ff6b6b")
+                return
+            cur.update(parent=info["parent"], items={})
+            lbl.config(text=info["path"] or "เครื่องนี้ (ไดรฟ์และโฟลเดอร์ผู้ใช้)", fg="#2fa8ff")
+            tree.delete(*tree.get_children())
+            for i, it in enumerate(info["items"]):
+                cur["items"][str(i)] = (it.get("p") or ntpath.join(info["path"], it["n"]), it["d"])
+                tree.insert("", "end", iid=str(i), text=("▸ " if it["d"] else "") + it["n"],
+                            values=("" if it["d"] else fmt_size(it["s"]), time.strftime("%Y-%m-%d %H:%M", time.localtime(it["m"])) if it["m"] else ""))
+
+        def do_pull():
+            files = [cur["items"][i][0] for i in tree.selection() if not cur["items"][i][1]]
+            if not files:
+                messagebox.showinfo("ดึงไฟล์", "เลือกไฟล์ก่อน (โฟลเดอร์ดึงไม่ได้ ดับเบิลคลิกเพื่อเปิดดู)", parent=b)
+                return
+            start_pull(files)
+
+        def open_sel(e=None):
+            sel = tree.selection()
+            if len(sel) == 1 and cur["items"][sel[0]][1]: go(cur["items"][sel[0]][0])
+            elif sel: do_pull()
+
+        def close_b():
+            br["fill"] = None
+            b.destroy()
+        ttk.Button(bot, text="ดึงไฟล์ที่เลือก", style="Accent.TButton", command=do_pull).pack(side="right")
+        ttk.Button(bot, text="ปิด", style="Ghost.TButton", command=close_b).pack(side="right", padx=8)
+        tk.Label(bot, text="ดับเบิลคลิกโฟลเดอร์เพื่อเปิด / เลือกหลายไฟล์ได้ (Ctrl, Shift) / ไฟล์ไปอยู่บนเดสก์ท็อปเครื่องนี้", bg="#101a2e", fg="#8fa3c4").pack(side="left")
+        tree.bind("<Double-1>", open_sel)
+        b.protocol("WM_DELETE_WINDOW", close_b)
+        br["fill"] = fill
+        go("")
 
     def on_move(e):
         x, y = scaled(e)
@@ -1084,7 +1278,7 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False):
                   font=("Segoe UI", 9)).pack(side="right", padx=4, pady=4)
     vbtn("ตัดการเชื่อมต่อ", close)
     vbtn("เต็มจอ (F11)", toggle_fs)
-    vbtn("ดึงไฟล์มา", pick_pull)
+    vbtn("ดึงไฟล์มา", open_browser)
     vbtn("ส่งไฟล์ไปเครื่องนั้น", pick_send)
     if DND[0]:
         try:
