@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import sys, os, json, socket, threading, time, io, ctypes, subprocess, winreg, re, ipaddress, uuid, urllib.request, zlib, queue
+import sys, os, json, socket, threading, time, io, ctypes, subprocess, winreg, re, ipaddress, uuid, urllib.request, zlib, queue, hashlib
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 from PIL import Image, ImageGrab, ImageChops
@@ -15,7 +15,8 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "1.9.0"
+APP_VER = "1.10.0"
+SETUP_REV = 1  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_ZT_NETWORK_ID = "b103a835d26ef7ce"
 PORT = 47101
@@ -94,16 +95,84 @@ def fetch_update():
     compile(src, "ZaiaRemote.py", "exec")  # กันไฟล์เสียก่อนเขียนทับ
     return m.group(1), data
 
-def apply_update(data):
+def http_get(url):
+    u = url + ("" if "?" in url else f"?t={int(time.time())}")
+    with urllib.request.urlopen(urllib.request.Request(u, headers={"User-Agent": "ZaiaRemote"}), timeout=30) as r:
+        return r.read()
+
+def update_base():  # โฟลเดอร์ดิบของ repo = ลิงก์อัปเดตตัดชื่อไฟล์ท้ายออก
+    return (cfg.get("update_url") or UPDATE_URL).split("?")[0].rsplit("/", 1)[0] + "/"
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""): h.update(b)
+    return h.hexdigest()
+
+def fetch_manifest():  # update.json = {"version","files":{ชื่อไฟล์:sha256},"zt_network_id"?,"zt_leave_old"?,"setup_rev"?}
+    m = json.loads(http_get(update_base() + "update.json").decode("utf-8-sig"))
+    if not re.fullmatch(r"\d+(\.\d+)*", str(m.get("version", ""))) or not isinstance(m.get("files"), dict):
+        raise ValueError("update.json ไม่ถูกต้อง")
+    for name in m["files"]:  # รับเฉพาะชื่อไฟล์เปล่า ๆ ในโฟลเดอร์โปรแกรม กันเขียนออกนอกโฟลเดอร์
+        if name != os.path.basename(name) or name.startswith(".") or "\\" in name or ":" in name:
+            raise ValueError(f"ชื่อไฟล์ใน update.json ไม่ปลอดภัย: {name}")
+    return m
+
+def changed_files(m):
+    out = []
+    for name, sha in m["files"].items():
+        p = os.path.join(SCRIPT_DIR, name)
+        if not os.path.exists(p) or sha256_file(p) != sha.lower(): out.append(name)
+    return out
+
+def check_update():  # -> (เลขรุ่น, manifest หรือ None, ข้อมูลไฟล์ที่โหลดมาแล้ว หรือ None)
+    try:
+        m = fetch_manifest()
+    except urllib.error.HTTPError as e:
+        if e.code != 404: raise
+        v, data = fetch_update()  # repo ที่ยังไม่มี update.json: อัปเดตไฟล์เดียวแบบเดิม
+        return v, None, {"ZaiaRemote.py": data}
+    return m["version"], m, None
+
+def stage_update(m):  # โหลดเฉพาะไฟล์ที่ต่างจากในเครื่อง ตรวจแฮชทุกไฟล์ก่อนแตะของเดิม
+    out = {}
+    for name in changed_files(m):
+        data = http_get(update_base() + name)
+        if hashlib.sha256(data).hexdigest() != m["files"][name].lower():
+            raise ValueError(f"{name}: แฮชไม่ตรง (ไฟล์เสียหรือเพิ่งอัปโหลดไม่ครบ) ลองใหม่ภายหลัง")
+        if name.endswith(".py"): compile(data.decode("utf-8-sig"), name, "exec")
+        out[name] = data
+    return out
+
+def relaunch(moves=()):
     me = os.path.abspath(__file__)
-    with open(me, "rb") as f: old = f.read()
-    with open(me + ".bak", "wb") as f: f.write(old)
-    with open(me + ".new", "wb") as f: f.write(data)
-    os.replace(me + ".new", me)
     flag = "" if is_admin() else " --noelev"
-    subprocess.Popen(f'cmd /c ping -n 3 127.0.0.1 >nul & start "" "{sys.executable}" "{me}"{flag}',
+    mv = "".join(f'move /y "{a}" "{b}" >nul & ' for a, b in moves)  # ไฟล์ที่ถูกล็อกตอนนี้ ย้ายหลังโปรแกรมปิด
+    subprocess.Popen(f'cmd /c ping -n 3 127.0.0.1 >nul & {mv}start "" "{sys.executable}" "{me}"{flag}',
                      shell=True, creationflags=0x08000000)  # รอให้ตัวเก่าปล่อย mutex ก่อนเปิดตัวใหม่
     os._exit(0)
+
+def apply_staged(m, staged):
+    moves = []
+    for name, data in staged.items():
+        p = os.path.join(SCRIPT_DIR, name)
+        if name.endswith(".py") and os.path.exists(p):
+            with open(p, "rb") as f: old = f.read()
+            with open(p + ".bak", "wb") as f: f.write(old)
+        with open(p + ".new", "wb") as f: f.write(data)
+        try: os.replace(p + ".new", p)
+        except OSError: moves.append((p + ".new", p))
+    zt = m.get("zt_network_id")
+    if zt and zt != cfg.get("zt_applied"):  # ปรับ ZeroTier เฉพาะตอนค่าใน update.json เปลี่ยน (ไม่ทับที่ผู้ใช้ตั้งเองถ้าค่าไม่ได้ถูกแก้)
+        old = cfg.get("zt_network_id")
+        cfg["zt_network_id"], cfg["zt_applied"] = zt, zt
+        save_config(cfg)
+        if m.get("zt_leave_old") and old and old != zt:
+            zt_run("leave", old)
+    relaunch(moves)
+
+def apply_update(data):
+    apply_staged({}, {"ZaiaRemote.py": data})
 
 try: ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception: pass
@@ -1151,7 +1220,8 @@ def main():
         if not auto: notify("กำลังตรวจสอบรุ่นใหม่ ...")
         def work():
             try:
-                v, data = fetch_update()
+                v, m, staged = check_update()
+                what = changed_files(m) if m else ["ZaiaRemote.py"]
             except Exception as e:
                 log_err(e)
                 if not auto:
@@ -1162,15 +1232,24 @@ def main():
             if ver_tuple(v) <= ver_tuple(APP_VER):
                 if not auto: notify(f"เป็นรุ่นล่าสุดแล้ว (v{APP_VER})")
                 return
+            if m and int(m.get("setup_rev", 0)) > SETUP_REV:
+                notify(f"รุ่น v{v} ต้องลงด้วยตัวติดตั้งใหม่ (ไลบรารี/ตัวหลักเปลี่ยน) อัปเดตจากปุ่มไม่ได้", True)
+                return
             if auto:
                 notify(f"มีรุ่นใหม่ v{v} — เข้า 'ตั้งค่า' แล้วกด 'ตรวจหารุ่นใหม่'")
                 return
+            zt_note = f"\nเปลี่ยนเครือข่าย ZeroTier เป็น {m['zt_network_id']}" if m and m.get("zt_network_id") and m["zt_network_id"] != cfg.get("zt_applied") else ""
             def ask():
-                if messagebox.askyesno("อัปเดต", f"มีรุ่นใหม่ v{v} (ตอนนี้ v{APP_VER})\nอัปเดตและเปิดโปรแกรมใหม่ไหม"):
-                    try: apply_update(data)
+                if not messagebox.askyesno("อัปเดต", f"มีรุ่นใหม่ v{v} (ตอนนี้ v{APP_VER})\nไฟล์ที่จะเปลี่ยน: {', '.join(what) or '-'}{zt_note}\nอัปเดตและเปิดโปรแกรมใหม่ไหม"):
+                    return
+                def go():
+                    try:
+                        notify("กำลังดาวน์โหลดรุ่นใหม่ ...")
+                        apply_staged(m or {}, staged if staged is not None else stage_update(m))
                     except Exception as e:
                         log_err(e)
                         notify(f"อัปเดตไม่สำเร็จ: {e} (ลองเปิดแบบ admin)", True)
+                threading.Thread(target=go, daemon=True).start()
             root.after(0, ask)
         threading.Thread(target=work, daemon=True).start()
 
