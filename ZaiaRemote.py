@@ -16,7 +16,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "1.13.0"
+APP_VER = "2.0"
 SETUP_REV = 1  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_ZT_NETWORK_ID = "b103a835d26ef7ce"
@@ -66,10 +66,6 @@ if not cfg.get("uid") or cfg.get("host") != HOSTNAME:  # config ถูกก๊�
 MY_ID = cfg["uid"]
 NAVY2RED = {"#101a2e": "#1a0505", "#16233d": "#3a0d0d", "#20314f": "#6b1f1f",
             "#e7f0ff": "#f5d9d9", "#8fa3c4": "#d79a9a", "#2fa8ff": "#ff6b81"}
-E_LIGHT = {"panel": "#ffffff", "panel2": "#eaf0f9", "accent": "#0b4f9c", "text": "#1a1a1a", "sub": "#4a5668", "ok": "#1b7f3b", "bad": "#c62828"}
-E_DARK = {"panel": "#260808", "panel2": "#3a0d0d", "accent": "#e0243f", "text": "#f5d9d9", "sub": "#d79a9a", "ok": "#2ecc71", "bad": "#ff5252"}
-def ecol(k):  # สีของแท็บไฟล์ (ใช้ค่าเดียวกับธีมหลัก เพื่อให้ recolor_widget สลับธีมตาม god ได้)
-    return (E_DARK if ADMIN[0] else E_LIGHT)[k]
 def tc(c):  # สีธีมน้ำเงิน -> แดงดำ เมื่ออยู่โหมดแอดมิน
     return NAVY2RED.get(c, c) if ADMIN[0] else c
 FONT = ["Tahoma"]  # ตั้งใหม่ตอนเปิดโปรแกรม: Leelawadee UI (ฟอนต์ไทยของ Windows) ถ้าไม่มีใช้ Tahoma
@@ -371,6 +367,36 @@ def ensure_zerotier(network_id):
         time.sleep(5)
     zt_wake.set()
 
+TASK_REV = 2
+def ensure_startup_task():  # ทุกเครื่องได้งานเปิดตอนล็อกอินแบบเดียวกัน (ลงด้วยตัวติดตั้งหรือรันจากซอร์ส) และไม่ติดเงื่อนไขแบตเตอรี่ ทำได้เฉพาะตอนเป็น admin
+    if not is_admin():
+        return
+    try:
+        pw = os.path.join(SCRIPT_DIR, "python", "pythonw.exe")
+        if not os.path.exists(pw) and not getattr(sys, "frozen", False):
+            pw = sys.executable.replace("python.exe", "pythonw.exe")
+        if not os.path.exists(pw):
+            return
+        tr = f'"{pw}" "{os.path.abspath(__file__)}" --silent'
+        mark = f"{TASK_REV}|{tr}"
+        if task_exists() and cfg.get("task_mark") == mark:
+            return
+        nw = 0x08000000
+        r = subprocess.run(["schtasks", "/Create", "/TN", "ZAIA Remote", "/TR", tr, "/SC", "ONLOGON", "/RU", "BUILTIN\\Users",
+                            "/RL", "HIGHEST", "/F"], capture_output=True, text=True, creationflags=nw, timeout=30)
+        if r.returncode != 0:
+            log_err("สร้างงานเปิดตอนเริ่มเครื่องไม่สำเร็จ: " + (r.stdout + r.stderr).strip()[:200]); return
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                            "Set-ScheduledTask -TaskName 'ZAIA Remote' -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries)"],
+                           capture_output=True, text=True, creationflags=nw, timeout=60)
+        if r.returncode != 0:
+            log_err("ตั้งค่างานเปิดตอนเริ่มเครื่องไม่สำเร็จ: " + (r.stdout + r.stderr).strip()[:200]); return
+        cfg["task_mark"] = mark
+        save_config(cfg)
+        set_autostart()  # มีงานแล้ว ลบ Run key ซ้ำออก
+    except Exception as e:
+        log_err(e)
+
 def ensure_firewall():  # เครื่องที่ไม่ได้ลงด้วยตัวติดตั้ง (รันจากซอร์ส) จะไม่มีกฎ firewall -> รับ UDP/TCP ไม่ได้
     if not is_admin():
         return
@@ -392,6 +418,155 @@ peers = {}  # id -> {"host","code","ver","last","ip","ips"}
 PORT_OK = {"udp": None, "tcp": None}
 peers_lock = threading.Lock()
 notified = set()
+
+CONNLOG = os.path.join(APPDIR, "connections.log")
+_cl_lock = threading.Lock()
+def conn_log(text):  # บันทึกว่าใครขอเข้า/ทำอะไรกับเครื่องนี้ (เก็บในเครื่องนี้เท่านั้น เกิน 512 KB เหลือ 2000 บรรทัดล่าสุด)
+    try:
+        with _cl_lock:
+            if os.path.exists(CONNLOG) and os.path.getsize(CONNLOG) > 512 * 1024:
+                with open(CONNLOG, "r", encoding="utf-8") as f: keep = f.readlines()[-2000:]
+                with open(CONNLOG, "w", encoding="utf-8") as f: f.writelines(keep)
+            with open(CONNLOG, "a", encoding="utf-8") as f:
+                f.write(time.strftime("%Y-%m-%d %H:%M:%S  ") + text.replace("\n", " ") + "\n")
+    except Exception as e:
+        log_err(e)
+
+def read_conn_log(n=300):
+    try:
+        with open(CONNLOG, "r", encoding="utf-8") as f: return "".join(f.readlines()[-n:])
+    except Exception:
+        return ""
+
+def supports_new(ver):  # โหมดไฟล์ไม่ดูจอ / ข้อความแจ้งเตือน / ดึงโฟลเดอร์ ต้องรุ่น 1.13.0 ขึ้นไป
+    return ver[:1].isdigit() and ver_tuple(ver) >= (1, 13, 0)
+
+PING = {}
+def ping_worker():  # วัดเวลาเชื่อม TCP ไปพอร์ตรับสาย (ส่ง "P" แล้วปิด ปลายทางไม่ถามผู้ใช้) ทำงานเฉพาะตอนเปิดโหมดแอดมิน
+    def one(ip):
+        t0 = time.time()
+        try:
+            c = socket.create_connection((ip, CTRL_PORT), timeout=1.5)
+            c.sendall(b"P"); c.close()
+            PING[ip] = int((time.time() - t0) * 1000)
+        except Exception:
+            PING[ip] = -1
+    while True:
+        try:
+            if ADMIN[0]:
+                with peers_lock:
+                    ips = {v.get("ip") for v in peers.values() if v.get("ip")}
+                for ip in ips:
+                    threading.Thread(target=one, args=(ip,), daemon=True).start()
+        except Exception as e:
+            log_err(e)
+        time.sleep(6)
+
+def zip_folder(root, limit=2 << 30):  # บีบโฟลเดอร์เป็น zip ชั่วคราว (ข้ามโฟลเดอร์ระบบ/ไฟล์ที่ล็อก) เกิน 2 GB คืน None
+    import tempfile, zipfile
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip"); tmp.close()
+    total = 0
+    try:
+        with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
+            base = os.path.dirname(root.rstrip("\\/"))
+            for d, dirs, files in os.walk(root):
+                dirs[:] = [x for x in dirs if not blocked(os.path.join(d, x))]
+                for fn in files:
+                    fp = os.path.join(d, fn)
+                    try:
+                        total += os.path.getsize(fp)
+                        if total > limit: raise OverflowError
+                        z.write(fp, os.path.relpath(fp, base))
+                    except OverflowError:
+                        raise
+                    except Exception:
+                        continue
+        return tmp.name
+    except Exception as e:
+        log_err(e)
+        try: os.remove(tmp.name)
+        except OSError: pass
+        return None
+
+def files_session(ips, work):  # เปิดการเชื่อมต่อโหมดไฟล์ (T) รอปลายทางอนุญาต (สูงสุด 60 วิ) แล้วเรียก work(sock) คืน (สำเร็จ?, ข้อความ)
+    last, s = "เชื่อมต่อไม่ได้", None
+    for ip in ips:
+        c = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        c.settimeout(5)
+        try:
+            c.connect((ip, CTRL_PORT)); c.sendall(b"T"); s = c
+            break
+        except Exception as e:
+            last = f"{ip}: {e}"; c.close()
+    if s is None:
+        return False, last
+    try:
+        s.settimeout(60)
+        hdr = recv_exact(s, 8)
+        if not hdr: return False, "ปลายทางไม่อนุญาต"
+        s.settimeout(None)
+        work(s)
+        return True, "สำเร็จ"
+    except socket.timeout:
+        return False, "ปลายทางไม่กดอนุญาตภายใน 60 วินาที"
+    except Exception as e:
+        return False, str(e)
+    finally:
+        try: s.close()
+        except Exception: pass
+
+def fmt_size(n):
+    for u in ("B", "KB", "MB", "GB"):
+        if n < 1024 or u == "GB": return f"{n:.0f} B" if u == "B" else f"{n:.1f} {u}"
+        n /= 1024
+
+def push_files(sock, paths, progress=None, stop=None):
+    total = sum(os.path.getsize(x) for x in paths) or 1
+    done, last = 0, 0.0
+    for x in paths:
+        nb = os.path.basename(x).encode("utf-8")
+        size = os.path.getsize(x)
+        sock.sendall(b"F" + len(nb).to_bytes(2, "little") + nb + size.to_bytes(8, "little"))
+        with open(x, "rb") as f:
+            while True:
+                if stop is not None and stop.is_set(): raise RuntimeError("ยกเลิก")
+                b = f.read(131072)
+                if not b: break
+                sock.sendall(b"C" + len(b).to_bytes(4, "little") + b)
+                done += len(b)
+                if progress and time.time() - last > 0.3:
+                    last = time.time(); progress(int(done * 100 / total))
+
+def send_message(ips, text):  # ข้อความแจ้งเตือนสั้นๆ ไปเด้งบนเครื่องปลายทาง (ไม่ต้องกดอนุญาต แต่แสดงชื่อผู้ส่ง และกันรัว)
+    tb = text.strip()[:300].encode("utf-8")
+    for ip in ips:
+        try:
+            c = socket.create_connection((ip, CTRL_PORT), timeout=4)
+            c.sendall(b"N" + len(tb).to_bytes(2, "little") + tb); c.close()
+            return True
+        except Exception:
+            continue
+    return False
+
+_msg_last = {}
+def handle_message_client(client, ip):
+    try:
+        client.settimeout(3)
+        n = int.from_bytes(recv_exact(client, 2), "little")
+        if n <= 0 or n > 1200: return
+        text = recv_exact(client, n).decode("utf-8", "replace")[:300]
+        now = time.time()
+        if now - _msg_last.get(ip, 0) < 5: return  # กันรัวข้อความจาก IP เดิม
+        _msg_last[ip] = now
+        who = peer_name(ip) or ip
+        conn_log(f"{ip} {who} | ส่งข้อความแจ้งเตือนมา: {text[:80]}")
+        ctypes.windll.user32.MessageBoxW(0, f"{text}\n\n— จาก {who} (IP {ip})", "ข้อความจาก ZAIA Remote", 0x40 | 0x40000 | 0x10000)
+    except Exception as e:
+        log_err(e)
+    finally:
+        try: client.close()
+        except Exception: pass
 
 def send_presence():
     msg = f"{HOSTNAME}|{username()}|{APP_VER}|{MY_ID}".encode("utf-8")
@@ -523,10 +698,15 @@ def control_server():
                 except Exception:
                     pass
             client.settimeout(None)
+            if hello == b"N":  # ข้อความแจ้งเตือน (รุ่น 1.13.0+)
+                threading.Thread(target=handle_message_client, args=(client, addr[0]), daemon=True).start()
+                continue
             if hello == b"P" or hello == b"":
                 client.close()
                 continue
             ans = 6 if cfg.get("auto_allow") else ctypes.windll.user32.MessageBoxW(0, (peer_name(addr[0]) + "\n" if peer_name(addr[0]) else "") + f"IP {addr[0]}\n\n" + ("ขอส่ง/ดึงไฟล์ในเครื่องนี้ (ไม่ดูจอ) อนุญาตไหม" if hello == b"T" else "ขอเข้ามาดูและควบคุมจอเครื่องนี้ อนุญาตไหม") + "\n(ถ้าไม่รู้จัก ให้กดไม่อนุญาต)", "มีคนขอส่ง/ดึงไฟล์" if hello == b"T" else "มีคนขอเข้ามาช่วยดูจอ", 0x04 | 0x20 | 0x100 | 0x40000)
+            conn_log(f"{addr[0]} {peer_name(addr[0])} | ขอ{'ส่ง/ดึงไฟล์ (ไม่ดูจอ)' if hello == b'T' else 'ดูจอ/ควบคุม'} | "
+                     + ("อนุญาตอัตโนมัติ" if cfg.get("auto_allow") else "อนุญาต" if ans == 6 else "ปฏิเสธ"))
             if ans != 6:  # IDYES
                 client.close()
                 continue
@@ -624,16 +804,27 @@ def send_file_to_client(client, lock, path, cancel=None):  # แพ็กเก�
         p = t + d
         with lock:
             client.sendall((len(p) | 0x80000000).to_bytes(4, "little") + p)
+    tmp = None
     try:
         if blocked(path):
             pkt(b"X", "โฟลเดอร์ระบบ ดึงไฟล์ไม่ได้".encode("utf-8"))
             return
-        if not os.path.isfile(path):
+        src, name = path, os.path.basename(path)
+        if os.path.isdir(path):  # โฟลเดอร์ -> บีบเป็น zip ก่อนส่ง
+            if len(path.rstrip("\\/")) <= 2:
+                pkt(b"X", "ดึงทั้งไดรฟ์ไม่ได้ เลือกโฟลเดอร์ย่อย".encode("utf-8"))
+                return
+            tmp = zip_folder(path)
+            if tmp is None:
+                pkt(b"X", "บีบโฟลเดอร์ไม่ได้ หรือใหญ่เกิน 2 GB".encode("utf-8"))
+                return
+            src, name = tmp, (os.path.basename(path.rstrip("\\/")) or "folder") + ".zip"
+        if not os.path.isfile(src):
             pkt(b"X", f"ไม่พบไฟล์บนเครื่องปลายทาง: {path}".encode("utf-8"))
             return
-        pkt(b"S", os.path.getsize(path).to_bytes(8, "little"))
-        pkt(b"N", os.path.basename(path).encode("utf-8"))
-        with open(path, "rb") as f:
+        pkt(b"S", os.path.getsize(src).to_bytes(8, "little"))
+        pkt(b"N", name.encode("utf-8"))
+        with open(src, "rb") as f:
             while True:
                 if cancel is not None and cancel.is_set():
                     pkt(b"X", "ยกเลิกการดึงไฟล์แล้ว".encode("utf-8"))
@@ -646,6 +837,10 @@ def send_file_to_client(client, lock, path, cancel=None):  # แพ็กเก�
         log_err(e)
         try: pkt(b"X", f"ส่งไฟล์ไม่สำเร็จ: {e}".encode("utf-8"))
         except Exception: pass
+    finally:
+        if tmp:
+            try: os.remove(tmp)
+            except OSError: pass
 
 def bgra_to_vf(size, b):  # BGRA -> VideoFrame ตรง ๆ (เร็วกว่าผ่าน PIL หลายเท่า); บางความกว้าง (เช่น 1366) แถวถูกเติมให้ยาวขึ้น ต้องก๊อปทีละแถว
     w, h = size
@@ -835,6 +1030,8 @@ def handle_control_client(client, q=1, h264=False):
 def apply_input_loop(client, gone, lock, files_only=False):
     fh, rem, fp = None, 0, None
     cancel = threading.Event()
+    try: peer = client.getpeername()[0]
+    except Exception: peer = "?"
     try:
         while True:
             t = recv_exact(client, 1)
@@ -870,6 +1067,7 @@ def apply_input_loop(client, gone, lock, files_only=False):
                 rem = int.from_bytes(recv_exact(client, 8), "little")
                 if fh: fh.close()
                 fp = unique_path(name)
+                conn_log(f"{peer} | ส่งไฟล์เข้ามา: {name} ({rem} ไบต์)")
                 fh = open(fp, "wb")
                 if rem == 0:
                     fh.close(); fh = None
@@ -885,6 +1083,7 @@ def apply_input_loop(client, gone, lock, files_only=False):
                 n = int.from_bytes(recv_exact(client, 2), "little")
                 path = recv_exact(client, n).decode("utf-8", "replace")
                 cancel.clear()
+                conn_log(f"{peer} | ดึงไฟล์/โฟลเดอร์: {path}")
                 threading.Thread(target=send_file_to_client, args=(client, lock, path, cancel), daemon=True).start()
             elif t == "Z":  # ขอยกเลิกการดึงไฟล์
                 cancel.set()
@@ -929,10 +1128,7 @@ def notify(msg, bad=False):
     if ROOT[0]:
         ROOT[0].after(0, f)
 
-def open_viewer(ips, q=1, auto=None, files_only=False, host=None, on_close=None):  # auto: None ปกติ, "send"/"pull" = เปิดแล้วเด้งกล่องส่ง/ดึงไฟล์ให้เลย (โหมดแอดมิน)
-    def bad(msg):
-        notify(msg, True)
-        if on_close: ROOT[0].after(0, lambda: on_close(msg))
+def open_viewer(ips, q=1, auto=None, files_only=False):  # auto: None ปกติ, "send"/"pull" = เปิดแล้วเด้งกล่องส่ง/ดึงไฟล์ให้เลย (โหมดแอดมิน)
     sock, fail = None, ""
     for ip in ips:
         notify(f"กำลังเชื่อมต่อ {ip} ...")
@@ -953,7 +1149,7 @@ def open_viewer(ips, q=1, auto=None, files_only=False, host=None, on_close=None)
             fail = f"เชื่อมต่อ {ip} ไม่ได้: {e}"
         s.close()
     if sock is None:
-        bad(f"{fail} (ลอง {len(ips)} ที่อยู่)")
+        notify(f"{fail} (ลอง {len(ips)} ที่อยู่)", True)
         return
     notify(f"รอปลายทาง {ip} กดอนุญาต (สูงสุด 60 วินาที) ...")
     try:
@@ -961,40 +1157,30 @@ def open_viewer(ips, q=1, auto=None, files_only=False, host=None, on_close=None)
         hdr = recv_exact(sock, 8)
         sock.settimeout(None)
     except socket.timeout:
-        bad(f"ปลายทาง {ip} ไม่กดอนุญาตภายใน 60 วินาที")
+        notify(f"ปลายทาง {ip} ไม่กดอนุญาตภายใน 60 วินาที", True)
         sock.close()
         return
     except Exception as e:
-        bad(f"การเชื่อมต่อ {ip} ขาด: {e}")
+        notify(f"การเชื่อมต่อ {ip} ขาด: {e}", True)
         return
     if not hdr:
-        bad(f"ปลายทาง {ip} ไม่อนุญาตให้ควบคุม")
+        notify(f"ปลายทาง {ip} ไม่อนุญาตให้ควบคุม", True)
         sock.close()
         return
     rw = int.from_bytes(hdr[0:4], "little")
     rh = int.from_bytes(hdr[4:8], "little")
     notify(f"เชื่อมต่อ {ip} สำเร็จ")
-    ROOT[0].after(0, lambda: viewer_window(sock, ip, rw, rh, QUALITY[q][2], q == 3, auto, files_only, host, on_close))
+    ROOT[0].after(0, lambda: viewer_window(sock, ip, rw, rh, QUALITY[q][2], q == 3, auto, files_only))
 
-def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=None, files_only=False, host=None, on_close=None):
+def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=None, files_only=False):
     from PIL import ImageTk
-    embedded = host is not None  # โหมดไฟล์ในแท็บของหน้าต่างหลัก (ไม่เปิดหน้าต่างแยก)
-    bar_bg, bar_fg = (ecol("panel2"), ecol("ok")) if embedded else ("#2a0808", "#ff6b6b") if ADMIN[0] else ("#101a2e", "#3ddc84")
-    if embedded:
-        win = host
-        for c_ in win.winfo_children(): c_.destroy()  # ล้างข้อความ "กำลังเชื่อมต่อ" ก่อนวางหน้าไฟล์
-    else:
-        win = tk.Toplevel(ROOT[0])
-        win.title(f"ส่ง/ดึงไฟล์: {ip}" if files_only else f"ควบคุม: {ip}   (F11 = เต็มจอ)")
-        win.geometry("760x96" if files_only else "1100x700")
-    done = [False]
-    def finish(msg=""):  # แท็บไฟล์: คืนสภาพเป็นหน้ารอเชื่อมต่อ (เรียกครั้งเดียว)
-        if embedded and not done[0]:
-            done[0] = True
-            if on_close: on_close(msg)
+    bar_bg, bar_fg = ("#2a0808", "#ff6b6b") if ADMIN[0] else ("#101a2e", "#3ddc84")
+    win = tk.Toplevel(ROOT[0])
+    win.title(f"ส่ง/ดึงไฟล์: {ip}" if files_only else f"ควบคุม: {ip}   (F11 = เต็มจอ)")
+    win.geometry("760x96" if files_only else "1100x700")
     bar = tk.Frame(win, bg=bar_bg)
     bar.pack(fill="x")
-    lbl_v = tk.Label(bar, text=(f"● ไฟล์ {ip}" if files_only else f"● เชื่อมต่อ {ip} • {qlabel}"), bg=bar_bg, fg=bar_fg, font=FNT(12 if embedded else 9, "bold"))
+    lbl_v = tk.Label(bar, text=(f"● ไฟล์ {ip}" if files_only else f"● เชื่อมต่อ {ip} • {qlabel}"), bg=bar_bg, fg=bar_fg, font=FNT(9, "bold"))
     lbl_v.pack(side="left", padx=10, pady=4)
     canvas = tk.Canvas(win, bg="black", highlightthickness=0)
     if not files_only: canvas.pack(fill="both", expand=True)
@@ -1006,35 +1192,20 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
     rf = {"fh": None, "path": "", "size": 0, "got": 0, "t0": 0.0, "last": 0.0, "name": ""}
     slock = threading.Lock()
     xf = {"w": None}
-    xb = {"f": None}
     cancel_up = threading.Event()
     pull = {"q": [], "n": 0, "i": 0}
     br = {"fill": None}
 
-    def ec(c):
-        return {"#3ddc84": ecol("ok"), "#ff6b6b": ecol("bad"), "#2fa8ff": ecol("accent")}.get(c, c) if embedded else c
-
     def say(text, color="#3ddc84"):
-        def f():
-            try: lbl_v.config(text=text, fg=ec(color))
-            except tk.TclError: pass
-        win.after(0, f)
+        win.after(0, lambda: lbl_v.config(text=text, fg=color))
 
     def fmt_size(n):
         for u in ("B", "KB", "MB", "GB"):
             if n < 1024 or u == "GB": return f"{n:.0f} B" if u == "B" else f"{n:.1f} {u}"
             n /= 1024
 
-    def xfer_ui(title, done, total, t0):  # ความคืบหน้า: แท็บไฟล์ = แถบด้านล่าง / โหมดดูจอ = หน้าต่างเล็ก (เรียกในเธรด Tk)
-        if embedded and not (xf["w"] and xf["w"].winfo_exists()):
-            w = tk.Frame(win, bg=ecol("panel2"))
-            w.pack(side="bottom", fill="x", padx=10, pady=(0, 8), before=xb["f"])
-            lbl = tk.Label(w, bg=ecol("panel2"), fg=ecol("text"), anchor="w"); lbl.pack(fill="x", padx=10, pady=(8, 2))
-            bar = ttk.Progressbar(w, maximum=100); bar.pack(fill="x", padx=10)
-            info = tk.Label(w, bg=ecol("panel2"), fg=ecol("sub"), anchor="w"); info.pack(side="left", padx=10, pady=(2, 8))
-            ttk.Button(w, text="ยกเลิก", style="Ghost.TButton", command=xfer_cancel).pack(side="right", padx=10, pady=(0, 8))
-            xf.update(w=w, lbl=lbl, bar=bar, info=info)
-        elif not (xf["w"] and xf["w"].winfo_exists()):
+    def xfer_ui(title, done, total, t0):  # หน้าต่างความคืบหน้า (เรียกในเธรด Tk)
+        if not (xf["w"] and xf["w"].winfo_exists()):
             w = tk.Toplevel(win)
             w.title("โอนไฟล์"); w.configure(bg=tc("#101a2e")); w.resizable(False, False); w.transient(win)
             lbl = tk.Label(w, bg=tc("#101a2e"), fg=tc("#e7f0ff"), anchor="w", width=62); lbl.pack(padx=14, pady=(12, 4))
@@ -1175,13 +1346,6 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
                 log_err(e)
 
     def poll():
-        if files_only:  # ไม่มีภาพ ตรวจแค่ว่าการเชื่อมต่อยังอยู่
-            if alive[0]: win.after(200, poll)
-            elif embedded: finish("ตัดการเชื่อมต่อ")
-            else:
-                win.title(f"ตัดการเชื่อมต่อ: {ip}")
-                lbl_v.config(text=f"● ตัดการเชื่อมต่อ {ip}", fg="#ff6b6b")
-            return
         cw, ch = canvas.winfo_width() or 1, canvas.winfo_height() or 1
         sc = min(cw / remote_w, ch / remote_h)
         dw, dh = max(int(remote_w * sc), 1), max(int(remote_h * sc), 1)
@@ -1255,22 +1419,20 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
         ps = filedialog.askopenfilenames(parent=win)
         if ps: send_files(list(ps))
 
-    def open_browser(parent=None):  # เรียกดูไฟล์ในเครื่องปลายทาง (parent = วางในแท็บ ไม่เปิดหน้าต่างใหม่)
-        b = parent if parent is not None else tk.Toplevel(win)
-        cb, ca, cs = (ecol("panel"), ecol("accent"), ecol("sub")) if parent is not None else (tc("#101a2e"), tc("#2fa8ff"), tc("#8fa3c4"))
-        if parent is None:
-            b.title("เรียกดูไฟล์ในเครื่องปลายทาง"); b.geometry("700x500"); b.configure(bg=cb)
+    def open_browser():  # เรียกดูไฟล์ในเครื่องปลายทาง
+        b = tk.Toplevel(win)
+        b.title("เรียกดูไฟล์ในเครื่องปลายทาง"); b.geometry("700x500"); b.configure(bg=tc("#101a2e"))
         cur = {"parent": None, "items": {}}
-        top = tk.Frame(b, bg=cb); top.pack(fill="x", padx=10, pady=8)
-        lbl = tk.Label(top, text="กำลังโหลด ...", bg=cb, fg=ca, anchor="w")
+        top = tk.Frame(b, bg=tc("#101a2e")); top.pack(fill="x", padx=10, pady=8)
+        lbl = tk.Label(top, text="กำลังโหลด ...", bg=tc("#101a2e"), fg=tc("#2fa8ff"), anchor="w")
         def go(path):
-            lbl.config(text="กำลังโหลด ...", fg=ca)
+            lbl.config(text="กำลังโหลด ...", fg=tc("#2fa8ff"))
             pb = path.encode("utf-8")
             send(b"L", len(pb).to_bytes(2, "little"), pb)
         ttk.Button(top, text="↑ ขึ้นไป", style="Ghost.TButton", command=lambda: go(cur["parent"] or "")).pack(side="left")
         lbl.pack(side="left", padx=10, fill="x", expand=True)
-        bot = tk.Frame(b, bg=cb); bot.pack(side="bottom", fill="x", padx=10, pady=8)
-        mid = tk.Frame(b, bg=cb); mid.pack(fill="both", expand=True, padx=10)
+        bot = tk.Frame(b, bg=tc("#101a2e")); bot.pack(side="bottom", fill="x", padx=10, pady=8)
+        mid = tk.Frame(b, bg=tc("#101a2e")); mid.pack(fill="both", expand=True, padx=10)
         tree = ttk.Treeview(mid, columns=("size", "mod"), selectmode="extended")
         tree.heading("#0", text="ชื่อ"); tree.heading("size", text="ขนาด"); tree.heading("mod", text="แก้ไขล่าสุด")
         tree.column("#0", width=360); tree.column("size", width=90, anchor="e"); tree.column("mod", width=150, anchor="center")
@@ -1280,10 +1442,10 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
         def fill(info):
             if not b.winfo_exists(): return
             if info.get("error"):
-                lbl.config(text=info["error"], fg=(ecol("bad") if parent is not None else "#ff6b6b"))
+                lbl.config(text=info["error"], fg="#ff6b6b")
                 return
             cur.update(parent=info["parent"], items={})
-            lbl.config(text=info["path"] or "เครื่องนี้ (ไดรฟ์และโฟลเดอร์ผู้ใช้)", fg=ca)
+            lbl.config(text=info["path"] or "เครื่องนี้ (ไดรฟ์และโฟลเดอร์ผู้ใช้)", fg=tc("#2fa8ff"))
             tree.delete(*tree.get_children())
             for i, it in enumerate(info["items"]):
                 cur["items"][str(i)] = (it.get("p") or ntpath.join(info["path"], it["n"]), it["d"])
@@ -1291,9 +1453,9 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
                             values=("" if it["d"] else fmt_size(it["s"]), time.strftime("%Y-%m-%d %H:%M", time.localtime(it["m"])) if it["m"] else ""))
 
         def do_pull():
-            files = [cur["items"][i][0] for i in tree.selection() if not cur["items"][i][1]]
+            files = [cur["items"][i][0] for i in tree.selection() if len(cur["items"][i][0].rstrip("\\/")) > 2]
             if not files:
-                messagebox.showinfo("ดึงไฟล์", "เลือกไฟล์ก่อน (โฟลเดอร์ดึงไม่ได้ ดับเบิลคลิกเพื่อเปิดดู)", parent=b)
+                messagebox.showinfo("ดึงไฟล์", "เลือกไฟล์หรือโฟลเดอร์ก่อน (โฟลเดอร์จะถูกบีบเป็น zip / ดึงทั้งไดรฟ์ไม่ได้)", parent=b)
                 return
             start_pull(files)
 
@@ -1305,14 +1467,11 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
         def close_b():
             br["fill"] = None
             b.destroy()
-        ttk.Button(bot, text="ดึงไฟล์ที่เลือก", style="Accent.TButton", command=do_pull).pack(side="right")
-        if parent is None: ttk.Button(bot, text="ปิด", style="Ghost.TButton", command=close_b).pack(side="right", padx=8)
-        else: ttk.Button(bot, text="ส่งไฟล์ไปเครื่องนั้น", style="Ghost.TButton", command=pick_send).pack(side="right", padx=8)
-        hint_txt = "ดับเบิลคลิกโฟลเดอร์เพื่อเปิด / เลือกหลายไฟล์ได้ (Ctrl, Shift) / ไฟล์ไปอยู่บนเดสก์ท็อปเครื่องนี้"
-        if parent is None: tk.Label(bot, text=hint_txt, bg=cb, fg=cs).pack(side="left")
-        else: tk.Label(b, text=hint_txt, bg=cb, fg=cs, anchor="w").pack(side="bottom", fill="x", padx=10, before=bot)
+        ttk.Button(bot, text="ดึงที่เลือก (โฟลเดอร์=zip)", style="Accent.TButton", command=do_pull).pack(side="right")
+        ttk.Button(bot, text="ปิด", style="Ghost.TButton", command=close_b).pack(side="right", padx=8)
+        tk.Label(bot, text="ดับเบิลคลิกโฟลเดอร์เพื่อเปิด / เลือกหลายไฟล์ได้ (Ctrl, Shift) / ไฟล์ไปอยู่บนเดสก์ท็อปเครื่องนี้", bg=tc("#101a2e"), fg=tc("#8fa3c4")).pack(side="left")
         tree.bind("<Double-1>", open_sel)
-        if parent is None: b.protocol("WM_DELETE_WINDOW", close_b)
+        b.protocol("WM_DELETE_WINDOW", close_b)
         br["fill"] = fill
         go("")
 
@@ -1344,7 +1503,7 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
     canvas.bind("<Button-2>", lambda e: on_down(e, 2))
     canvas.bind("<ButtonRelease-2>", lambda e: on_up(e, 2))
     canvas.bind("<MouseWheel>", on_wheel)
-    if not embedded: win.bind("<F11>", toggle_fs)
+    win.bind("<F11>", toggle_fs)
     if not files_only:
         win.bind("<KeyPress>", lambda e: on_key(e, False))
         win.bind("<KeyRelease>", lambda e: on_key(e, True))
@@ -1353,24 +1512,16 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
         alive[0] = False
         try: sock.close()
         except Exception: pass
-        if embedded: finish("")
-        else: win.destroy()
-    if embedded: host.close_session = close
-    else: win.protocol("WM_DELETE_WINDOW", close)
+        win.destroy()
+    win.protocol("WM_DELETE_WINDOW", close)
     def vbtn(text, cmd):
-        tk.Button(bar, text=text, command=lambda: (cmd(), canvas.focus_set()),
-                  bg=ecol("panel") if embedded else tc("#16233d"), fg=ecol("text") if embedded else tc("#e7f0ff"),
-                  activebackground=ecol("panel2") if embedded else tc("#20314f"), activeforeground="#ffffff" if not embedded else ecol("text"),
-                  relief="flat", padx=14 if embedded else 10, pady=6 if embedded else 2, font=FNT(12 if embedded else 9)).pack(side="right", padx=4, pady=4)
+        tk.Button(bar, text=text, command=lambda: (cmd(), canvas.focus_set()), bg=tc("#16233d"), fg=tc("#e7f0ff"),
+                  activebackground=tc("#20314f"), activeforeground="#ffffff", relief="flat", padx=10, pady=2,
+                  font=FNT(9)).pack(side="right", padx=4, pady=4)
     vbtn("ตัดการเชื่อมต่อ", close)
     if not files_only: vbtn("เต็มจอ (F11)", toggle_fs)
-    if not embedded:
-        vbtn("ดึงไฟล์มา", open_browser)
-        vbtn("ส่งไฟล์ไปเครื่องนั้น", pick_send)
-    else:
-        xb["f"] = tk.Frame(win, bg=ecol("panel"))
-        xb["f"].pack(fill="both", expand=True)
-        open_browser(xb["f"])
+    vbtn("ดึงไฟล์มา", open_browser)
+    vbtn("ส่งไฟล์ไปเครื่องนั้น", pick_send)
     if DND[0]:
         try:
             canvas.drop_target_register(DND_FILES)
@@ -1381,7 +1532,7 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
     threading.Thread(target=recv_frames, daemon=True).start()
     threading.Thread(target=render_loop, daemon=True).start()
     if auto == "send": win.after(300, pick_send)
-    elif auto == "pull" and not embedded: win.after(300, open_browser)
+    elif auto == "pull": win.after(300, open_browser)
     poll()
 
 # ---------- GUI ----------
@@ -1389,8 +1540,10 @@ def main():
     threading.Thread(target=listener, daemon=True).start()
     threading.Thread(target=broadcaster, daemon=True).start()
     threading.Thread(target=control_server, daemon=True).start()
+    threading.Thread(target=ping_worker, daemon=True).start()
     threading.Thread(target=zt_poll, daemon=True).start()
     threading.Thread(target=ensure_firewall, daemon=True).start()
+    threading.Thread(target=ensure_startup_task, daemon=True).start()
 
     if not cfg.get("zt_network_id"):
         cfg["zt_network_id"] = DEFAULT_ZT_NETWORK_ID
@@ -1423,7 +1576,7 @@ def main():
     root.title(f"ZAIA Remote Desktop v{APP_VER}")
     root.geometry("1100x700")
     root.configure(bg=BG)
-    root.minsize(900, 560)
+    root.minsize(640, 420)
     try: root.state("zoomed")
     except Exception: pass
     try: root.iconbitmap(ICON_PATH)
@@ -1453,12 +1606,45 @@ def main():
         style.map("Accent.TButton", background=[("active", c(ACCENT2))])
         style.configure("Go.TButton", background=c("#1b7f3b"), foreground="#ffffff", font=FNT(15, "bold"), padding=16, borderwidth=0)
         style.map("Go.TButton", background=[("active", c("#146030"))])
-        style.configure("Ghost.TButton", background=c(PANEL2), foreground=c(TEXT), font=FNT(12), padding=10, borderwidth=0)
+        style.configure("Ghost.TButton", background=c(PANEL2), foreground=c(TEXT), font=FNT(12), padding=14, borderwidth=0)
+        style.configure("Vertical.TScrollbar", arrowsize=S(28))
         style.map("Ghost.TButton", background=[("active", c("#20314f"))])
         style.configure("Treeview", background=c(PANEL2), fieldbackground=c(PANEL2), foreground=c(TEXT), rowheight=int(S(46) * SCALE[0]), borderwidth=0, font=FNT(12))
         style.configure("Treeview.Heading", background=c(PANEL), foreground=c(ACCENT), font=FNT(12, "bold"), borderwidth=0)
         style.map("Treeview", background=[("selected", c(ACCENT2))], foreground=[("selected", "#ffffff")])
     apply_styles(False)
+
+    def popup(title):  # ป็อปอัปกลางหน้าต่างหลัก (ไม่สร้างหน้าต่างแยก) คืน (พื้นหลัง, กล่อง, ฟังก์ชันแปลงสี)
+        c = (lambda x: LIGHT2DARK.get(x, x)) if ADMIN[0] else (lambda x: x)
+        dim = tk.Frame(root, bg=c("#2c3e5c"))
+        dim.place(x=0, y=0, relwidth=1, relheight=1)
+        w = tk.Frame(dim, bg=c(PANEL), highlightbackground=c(ACCENT), highlightthickness=4)
+        w.place(relx=0.5, rely=0.5, anchor="center")
+        tk.Label(w, text=title, bg=c(PANEL), fg=c(TEXT), font=FNT(18, "bold"), justify="left",
+                 wraplength=max(min(S(620), root.winfo_width() - S(120)), S(240))).pack(anchor="w", padx=S(24), pady=(S(20), S(8)))
+        dim.lift()
+        return dim, w, c
+
+    flows, flow_w = {}, {}  # แถวปุ่มที่ตัดบรรทัดเองตามความกว้างจอ (แท็บเล็ต/จอแคบ)
+    def reflow(fr):
+        ws = [w for w, a in flows[fr] if ADMIN[0] or not a]
+        for w, a in flows[fr]: w.grid_forget()
+        cw = fr.winfo_width()
+        mx = max([w.winfo_reqwidth() for w in ws] or [1]) + 8
+        per = max(1, min(len(ws) or 1, cw // mx if cw > 1 else len(ws)))
+        for i in range(12): fr.columnconfigure(i, weight=0, uniform="")
+        for i in range(per): fr.columnconfigure(i, weight=1, uniform="b")
+        for i, w in enumerate(ws): w.grid(row=i // per, column=i % per, padx=4, pady=4, sticky="ew")
+    def add_flow(fr, w, admin=False):
+        if fr not in flows:
+            flows[fr] = []
+            def on_cfg(e, fr=fr):
+                if flow_w.get(fr) != e.width:
+                    flow_w[fr] = e.width
+                    reflow(fr)
+            fr.bind("<Configure>", on_cfg, add="+")
+        flows[fr].append((w, admin))
+        return w
 
     header = ttk.Frame(root, style="TFrame")
     header.pack(fill="x", padx=20, pady=(14, 6))
@@ -1490,6 +1676,9 @@ def main():
         if left.winfo_ismapped():
             left.grid_remove()
             right.grid(row=0, column=0, columnspan=2, padx=0)
+        elif root.winfo_width() < S(1000):  # จอแคบ: แสดงตั้งค่าเต็มหน้าแทนที่รายชื่อ
+            right.grid_remove()
+            left.grid(row=0, column=0, columnspan=2, padx=0, sticky="nsew")
         else:
             left.grid()
             right.grid(row=0, column=1, columnspan=1, padx=(8, 0))
@@ -1603,17 +1792,11 @@ def main():
         threading.Thread(target=work, daemon=True).start()
 
     urow = tk.Frame(left, bg=PANEL)
-    urow.pack(anchor="w", padx=16, pady=10)
-    urow2 = tk.Frame(left, bg=PANEL)  # แถวที่สอง: ปุ่มของโหมดแอดมิน (แถวแรกกว้างพอแค่ 2 ปุ่ม ปุ่มที่สามโดนตัด)
-    urow2.pack(anchor="w", padx=16)
-    ttk.Button(urow, text="เปลี่ยนข้อมูล", style="Ghost.TButton", command=lambda: ask_user(False)).pack(side="left")
-    ttk.Button(urow, text="ตรวจหารุ่นใหม่", style="Ghost.TButton", command=do_update).pack(side="left", padx=6)
+    urow.pack(fill="x", padx=16, pady=10)
+    add_flow(urow, ttk.Button(urow, text="เปลี่ยนข้อมูล", style="Ghost.TButton", command=lambda: ask_user(False)))
+    add_flow(urow, ttk.Button(urow, text="ตรวจหารุ่นใหม่", style="Ghost.TButton", command=do_update))
     root.after(8000, lambda: do_update(True))
 
-    def gap():  # ตัวคั่นยืดได้ + เส้นแบ่ง: แบ่งพื้นที่ว่างฝั่งซ้ายให้เท่ากันระหว่างหัวข้อ
-        f_ = tk.Frame(left, bg=PANEL); f_.pack(fill="both", expand=True)
-        tk.Frame(f_, bg="#223354", height=1).place(relx=0.04, rely=0.5, relwidth=0.92)
-    gap()
     ttk.Label(left, text="การเชื่อมต่อเครือข่าย (ZeroTier)", style="Section.TLabel").pack(anchor="w", padx=16, pady=(14, 6))
     lbl_zt = tk.Label(left, text=f"Network ID: {cfg.get('zt_network_id','') or 'ยังไม่ตั้งค่า'}", bg=PANEL, fg=SUBTEXT, justify="left", anchor="w")
     lbl_zt.pack(fill="x", padx=16)
@@ -1641,10 +1824,9 @@ def main():
     ttk.Button(nrow, text="คัดลอก", style="Ghost.TButton", command=copy_node).pack(side="left", padx=8)
     zrow = tk.Frame(left, bg=PANEL)
     zrow.pack(fill="x", padx=16, pady=10)
-    ttk.Button(zrow, text="ตั้งค่า Network ID", style="Ghost.TButton", command=change_zt).pack(side="left")
-    ttk.Button(zrow, text="เชื่อมต่อใหม่", style="Ghost.TButton", command=rejoin).pack(side="left", padx=6)
+    add_flow(zrow, ttk.Button(zrow, text="ตั้งค่า Network ID", style="Ghost.TButton", command=change_zt))
+    add_flow(zrow, ttk.Button(zrow, text="เชื่อมต่อใหม่", style="Ghost.TButton", command=rejoin))
 
-    gap()
     ttk.Label(left, text="โหมดเซิร์ฟเวอร์", style="Section.TLabel").pack(anchor="w", padx=16, pady=(10, 6))
     auto_var = tk.BooleanVar(value=bool(cfg.get("auto_allow", False)))
     def toggle_auto():
@@ -1654,32 +1836,16 @@ def main():
         save_config(cfg)
     tk.Checkbutton(left, text="อนุญาตเชื่อมต่ออัตโนมัติ (ไม่มีคนนั่งหน้าเครื่อง)", variable=auto_var, command=toggle_auto,
                    bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT,
-                   anchor="w", justify="left", wraplength=S(320)).pack(fill="x", padx=16, pady=(0, 14))
+                   anchor="w", justify="left", wraplength=S(320)).pack(fill="x", padx=16)
 
-    tabbar = tk.Frame(right, bg=PANEL)  # แท็บ รายการเครื่อง / ไฟล์ : แสดงเฉพาะโหมดแอดมิน
-    page_list = tk.Frame(right, bg=PANEL)
-    page_list.pack(fill="both", expand=True)
-    page_files = tk.Frame(right, bg=PANEL)
-    files_body = tk.Frame(page_files, bg=PANEL)
-    files_body.pack(fill="both", expand=True)
-    files_state = {"tok": None}
-    tab_btns = {}
-    def show_page(name):
-        page_list.pack_forget(); page_files.pack_forget()
-        (page_list if name == "list" else page_files).pack(fill="both", expand=True)
-        for k, b_ in tab_btns.items(): b_.config(style="Accent.TButton" if k == name else "Ghost.TButton")
-    tab_btns["list"] = ttk.Button(tabbar, text="รายการเครื่อง", style="Accent.TButton", command=lambda: show_page("list"))
-    tab_btns["files"] = ttk.Button(tabbar, text="ไฟล์ (ไม่ดูจอ)", style="Ghost.TButton", command=lambda: show_page("files"))
-    tab_btns["list"].pack(side="left"); tab_btns["files"].pack(side="left", padx=6)
-
-    rhead = tk.Frame(page_list, bg=PANEL)
+    rhead = tk.Frame(right, bg=PANEL)
     rhead.pack(fill="x", padx=16, pady=(14, 6))
     lbl_peers = ttk.Label(rhead, text="เครื่องที่เปิดใช้งานอยู่", style="Section.TLabel")
     lbl_peers.pack(side="left")
     ttk.Button(rhead, text="รีเฟรชรายชื่อ", style="Ghost.TButton", command=lambda: refresh_now()).pack(side="right")
     ttk.Button(rhead, text="ต่อไม่ได้? กดตรงนี้", style="Ghost.TButton", command=lambda: diag()).pack(side="right", padx=6)
 
-    ttk.Label(page_list, text="ดับเบิลคลิกชื่อเครื่อง หรือคลิกเลือกแล้วกดปุ่มสีเขียวด้านล่าง", style="Sub.TLabel", background=PANEL).pack(anchor="w", padx=16, pady=(0, 6))
+    ttk.Label(right, text="ดับเบิลคลิกชื่อเครื่อง หรือคลิกเลือกแล้วกดปุ่มสีเขียวด้านล่าง", style="Sub.TLabel", background=PANEL).pack(anchor="w", padx=16, pady=(0, 6))
 
     def do_connect():
         sel_item = tree.selection()
@@ -1695,34 +1861,45 @@ def main():
             ips = [ip] + sorted(peers.get(uid, {}).get("ips", set()) - {ip})
         who = str(tree.item(uid)["values"][1])
         ask_quality(who, lambda q: threading.Thread(target=open_viewer, args=(ips, q), daemon=True).start())
-    lbl_status = tk.Label(page_list, text="พร้อมใช้งาน", bg=PANEL, fg=SUBTEXT, anchor="w", justify="left", wraplength=S(340))
+    lbl_status = tk.Label(right, text="พร้อมใช้งาน", bg=PANEL, fg=SUBTEXT, anchor="w", justify="left", wraplength=S(340))
     lbl_status.pack(side="bottom", fill="x", padx=16, pady=(0, 12))
     STATUS[0] = lbl_status
     def connect_ip():
         v = simpledialog.askstring("เชื่อมต่อด้วย IP", "ใส่ IP ของเครื่องปลายทาง (IP ZeroTier)")
         if v and v.strip():
             ask_quality(v.strip(), lambda q: threading.Thread(target=open_viewer, args=([v.strip()], q), daemon=True).start())
-    crow = tk.Frame(page_list, bg=PANEL)
+    crow = tk.Frame(right, bg=PANEL)
     crow.pack(side="bottom", fill="x", padx=16, pady=12)
-    ttk.Button(crow, text="ดูจอเครื่องที่เลือก", style="Go.TButton", command=do_connect).pack(side="left")
-    ttk.Button(crow, text="ต่อด้วยเลข IP", style="Ghost.TButton", command=connect_ip).pack(side="left", padx=8)
+    add_flow(crow, ttk.Button(crow, text="ดูจอเครื่องที่เลือก", style="Go.TButton", command=do_connect))
+    add_flow(crow, ttk.Button(crow, text="ต่อด้วยเลข IP", style="Ghost.TButton", command=connect_ip))
 
-    cols = ("host", "user", "status", "ip", "ver")
-    tree = ttk.Treeview(page_list, columns=cols, show="headings")
+    cols = ("host", "user", "status", "ip", "ping", "ver", "ips")
+    COLS_N = ("host", "user", "status", "ver")  # โหมดธรรมดาไม่แสดง IP (ยังเก็บค่าไว้ใช้เชื่อมต่อ); โหมดแอดมินแสดง IP และ ping
+    COLS_A = ("host", "user", "status", "ip", "ping", "ver")
+    HEADS = {"host": "เครื่อง", "user": "ผู้ใช้", "status": "สถานะ", "ip": "IP", "ping": "ping", "ver": "รุ่น", "ips": ""}
+    COLW = {"host": 26, "user": 26, "status": 13, "ip": 18, "ping": 9, "ver": 10}   # สัดส่วนความกว้าง
+    COLMIN = {"host": 90, "user": 90, "status": 84, "ip": 112, "ping": 62, "ver": 66}  # ขั้นต่ำ (ก่อนคูณขนาดจอ)
+    tree = ttk.Treeview(right, columns=cols, show="headings", displaycolumns=COLS_N)
     for c in cols:
-        tree.heading(c, text={"host":"เครื่อง","user":"ผู้ใช้","status":"สถานะ","ip":"IP","ver":"รุ่น"}[c])
-        tree.column(c, width=S(200), minwidth=S(80), anchor="w" if c in ("host", "user") else "center", stretch=(c in ("host", "user")))
-    def fit_cols():  # คอลัมน์ตัวเลขกว้างตามฟอนต์จริง (เดิมกว้างคงที่ พอฟอนต์ขยายแล้วโดนตัด)
-        f = FNT(12, "bold")
-        for c_, sample in (("status", "รุ่นเก่า"), ("ip", "255.255.255.255"), ("ver", "10.10.10")):
-            w_ = f.measure(sample) + S(36)
-            tree.column(c_, width=w_, minwidth=w_, stretch=False)
-    fit_cols()
+        tree.heading(c, text=HEADS[c])
+        tree.column(c, width=S(COLMIN.get(c, 60)), minwidth=S(COLMIN.get(c, 60)), anchor="w" if c in ("host", "user") else "center", stretch=False)
+    def fit_cols(e=None):  # แบ่งความกว้างตามสัดส่วนทุกครั้งที่ตารางเปลี่ยนขนาด ไม่ให้คอลัมน์ท้ายหลุดขอบ
+        shown = list(tree["displaycolumns"])
+        tot = tree.winfo_width() - S(6)
+        if tot < S(200): return
+        wsum = sum(COLW[c] for c in shown)
+        for c in shown:
+            tree.column(c, width=max(int(tot * COLW[c] / wsum), S(COLMIN[c])))
+    def update_cols():
+        tree["displaycolumns"] = COLS_A if ADMIN[0] else COLS_N
+        fit_cols()
+    tree.bind("<Configure>", fit_cols, add="+")
     tree.pack(fill="both", expand=True, padx=16)
     tree.tag_configure("dup", foreground="#b36200")
     tree.tag_configure("ok", foreground=OK_C)
     tree.tag_configure("me", foreground=ACCENT)
     tree.bind("<Double-1>", lambda e: do_connect())
+    v_filter = tk.StringVar()
 
     hint = [True]
     def refresh_loop(loop=True):
@@ -1735,18 +1912,27 @@ def main():
             all_m.update({k: dict(v) for k, v in peers.items()})
 
         old_sel = tree.selection()
+        flt = v_filter.get().strip().lower() if ADMIN[0] else ""
+        n_behind = 0
         tree.delete(*tree.get_children())
         for k in sorted(all_m, key=lambda x: (all_m[x]["host"].lower(), x)):
             v = all_m[k]
+            ips_txt = "127.0.0.1" if k == MY_ID else ", ".join(sorted(v.get("ips") or {v["ip"]}))
             old = is_old(v["ver"])
-            tag = "me" if k == MY_ID else "dup" if old else "ok"
+            behind = (not old) and ver_tuple(v["ver"]) < ver_tuple(APP_VER)
+            n_behind += 1 if (old or behind) else 0
+            if flt and flt not in f'{v["host"]} {v["code"]} {ips_txt}'.lower(): continue
+            tag = "me" if k == MY_ID else "dup" if (old or behind) else "ok"
             who = f"(รุ่นเก่า รหัส {v['code']})" if old else v["code"]
-            tree.insert("", "end", iid=k, values=(v["host"], who, "รุ่นเก่า" if old else "ปกติ", v["ip"], v["ver"]), tags=(tag,))
+            status = "รุ่นเก่า" if old else "ควรอัปเดต" if behind else "ปกติ"
+            pg = PING.get(v["ip"])
+            ptxt = "-" if (k == MY_ID or pg is None) else (f"{pg} ms" if pg >= 0 else "✗")
+            tree.insert("", "end", iid=k, values=(v["host"], who, status, v["ip"], ptxt, v["ver"], ips_txt), tags=(tag,))
 
         keep = [i for i in old_sel if tree.exists(i)]
         if keep:
             tree.selection_set(keep)
-        lbl_peers.config(text=f"เครื่องที่เปิดใช้งานอยู่ ({len(all_m)})")
+        lbl_peers.config(text=f"เครื่องที่เปิดใช้งานอยู่ ({len(all_m)})" + (f" • ควรอัปเดต {n_behind}" if ADMIN[0] and n_behind else ""))
         lbl_ztst.config(text=ZT["msg"], fg=OK_C if ZT["ok"] else DUP_C)
         lbl_node.config(text=f"Node ID: {ZT['node'] or '-'}")
         state = len(all_m) > 1 or time.time() - START < 15
@@ -1888,12 +2074,10 @@ def main():
             try: fn()
             except Exception as e:
                 errs.append(f"{getattr(fn, '__name__', 'step')}: {e}"); log_err(f"toggle_admin {errs[-1]}")
-        if not ADMIN[0]:  # ปิด god: ตัดเซสชันไฟล์และกลับหน้ารายการ (เดิมหน้าต่างไฟล์ค้างอยู่)
-            files_state["tok"] = None
-            step(files_stop)
-            step(lambda: show_page("list"))
         for w, kw in admin_only.items():  # ปุ่มก่อนเสมอ
             step(lambda w=w, kw=kw: w.pack(**kw) if ADMIN[0] else w.pack_forget())
+        step(update_cols)
+        step(lambda: [reflow(f) for f in list(flows)])
         step(lambda: apply_styles(ADMIN[0]))
         step(lambda: recolor_widget(root))
         step(recolor_misc)
@@ -1939,74 +2123,286 @@ def main():
         ttk.Button(row, text="ยกเลิก", style="Ghost.TButton", command=dim.destroy).pack(side="right", padx=10)
         ent.bind("<Return>", lambda e: ok())
         dim.lift(); w.grab_set(); ent.focus_set()
-    btn_admin_name = ttk.Button(urow2, text="ตั้งชื่อแอดมิน", style="Ghost.TButton", command=set_admin_name)
-    admin_only[btn_admin_name] = {"side": "left"}
 
-    def files_idle(msg=""):  # หน้ารอเชื่อมต่อของแท็บไฟล์
-        for c_ in files_body.winfo_children(): c_.destroy()
-        tk.Label(files_body, text="ส่ง/ดึงไฟล์ (ไม่ดูจอ)", bg=ecol("panel"), fg=ecol("accent"), font=FNT(16, "bold")).pack(anchor="w", padx=20, pady=(20, 4))
-        tk.Label(files_body, text="เลือกเครื่องในแท็บ 'รายการเครื่อง' แล้วกดปุ่มด้านล่าง ปลายทางต้องกดอนุญาตก่อน", bg=ecol("panel"), fg=ecol("sub"), font=FNT(12),
-                 justify="left", anchor="w", wraplength=S(520)).pack(anchor="w", padx=20)
-        if msg: tk.Label(files_body, text=msg, bg=ecol("panel"), fg=ecol("bad"), font=FNT(12), justify="left", anchor="w", wraplength=S(520)).pack(anchor="w", padx=20, pady=(10, 0))
-        ttk.Button(files_body, text="เชื่อมต่อเครื่องที่เลือก", style="Go.TButton", command=lambda: files_open()).pack(anchor="w", padx=20, pady=16)
+    def selected_targets():  # [(uid, [ip ...], ชื่อเครื่อง, รุ่น)] ไม่รวมเครื่องตัวเอง
+        out = []
+        for uid in tree.selection():
+            if uid == MY_ID: continue
+            vals = tree.item(uid)["values"]
+            ip = str(vals[3])
+            with peers_lock:
+                ips = [ip] + sorted(peers.get(uid, {}).get("ips", set()) - {ip})
+            out.append((uid, ips, str(vals[0]), str(vals[5])))
+        return out
 
-    def files_stop():  # ปิดเซสชันไฟล์ที่ค้างอยู่ (ถ้ามี)
-        fn = getattr(files_body, "close_session", None)
-        files_body.close_session = None
-        if fn:
-            try: fn()
+    def new_only(ts):  # ตัดเครื่องที่ยังไม่รองรับฟีเจอร์ใหม่ (รุ่นต่ำกว่า 1.13.0) ออก พร้อมแจ้ง
+        old = [t for t in ts if not supports_new(t[3])]
+        if old: notify("ข้ามเครื่องที่ยังไม่รองรับ (ต้องอัปเดตเป็น 1.13.0): " + ", ".join(t[2] for t in old), True)
+        return [t for t in ts if supports_new(t[3])]
+
+    def run_multi_send(ts, paths):  # ป็อปอัปในโปรแกรม: ส่งไปหลายเครื่องพร้อมกัน แต่ละเครื่องรอกดอนุญาตเอง ปิดเองเมื่อสำเร็จครบ
+        dim, w, c = popup(f"ส่ง {len(paths)} ไฟล์ ไป {len(ts)} เครื่อง")
+        box = tk.Label(w, bg=c(PANEL2), fg=c(TEXT), font=FNT(13), justify="left", anchor="nw", width=44, height=min(len(ts), 8) + 1)
+        box.pack(padx=S(24), pady=S(6), fill="x", ipady=S(6))
+        stop, status = threading.Event(), {t[0]: "รอปลายทางกดอนุญาต ..." for t in ts}
+        def close():
+            stop.set()
+            if dim.winfo_exists(): dim.destroy()
+        def render():
+            if dim.winfo_exists(): box.config(text="\n".join(f"{t[2]}:  {status[t[0]]}" for t in ts))
+        def upd(uid, text):
+            def f():
+                status[uid] = text; render()
+                if all(v.startswith("✓") for v in status.values()): root.after(1500, close)
+            try: root.after(0, f)
+            except Exception: pass
+        ttk.Button(w, text="ปิด / ยกเลิก", style="Ghost.TButton", command=close).pack(side="right", padx=S(24), pady=(S(4), S(20)))
+        def worker(t):
+            uid, ips = t[0], t[1]
+            def work(sock):
+                upd(uid, "กำลังส่ง ...")
+                push_files(sock, paths, lambda pc: upd(uid, f"กำลังส่ง {pc}%"), stop)
+            ok, msg = files_session(ips, work)
+            upd(uid, "✓ ส่งเสร็จ (อยู่บนเดสก์ท็อปปลายทาง)" if ok else "✗ " + msg)
+        for t in ts: threading.Thread(target=worker, args=(t,), daemon=True).start()
+        render()
+
+    def open_pull(t):  # ป็อปอัปในโปรแกรม: เรียกดูโฟลเดอร์เครื่องปลายทางแล้วดึงไฟล์ (โฟลเดอร์ = zip) ไม่ดูจอ ไม่มีหน้าต่างแยก
+        ips, name = t[1], t[2]
+        dim, w, c = popup(f"ดึงไฟล์จาก {name}")
+        lbl = tk.Label(w, text="รอปลายทางกดอนุญาต (สูงสุด 60 วินาที) ...", bg=c(PANEL), fg=c(ACCENT), anchor="w", justify="left",
+                       font=FNT(12), wraplength=max(min(S(620), root.winfo_width() - S(120)), S(240)))
+        lbl.pack(fill="x", padx=S(24))
+        mid = tk.Frame(w, bg=c(PANEL)); mid.pack(fill="both", expand=True, padx=S(24), pady=S(8))
+        tv = ttk.Treeview(mid, columns=("size", "mod"), selectmode="extended", height=8)
+        tv.heading("#0", text="ชื่อ"); tv.heading("size", text="ขนาด"); tv.heading("mod", text="แก้ไขล่าสุด")
+        tv.column("#0", width=S(280)); tv.column("size", width=S(90), anchor="e"); tv.column("mod", width=S(140), anchor="center")
+        sb = ttk.Scrollbar(mid, orient="vertical", command=tv.yview); tv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y"); tv.pack(side="left", fill="both", expand=True)
+        pb = ttk.Progressbar(w, maximum=100); pb.pack(fill="x", padx=S(24))
+        row = tk.Frame(w, bg=c(PANEL)); row.pack(fill="x", padx=S(24), pady=S(12))
+        st = {"sock": None, "lock": threading.Lock(), "alive": True, "parent": None, "items": {}, "fh": None, "path": "",
+              "size": 0, "got": 0, "t0": 0.0, "last": 0.0, "nm": "", "q": [], "n": 0, "i": 0}
+        def ui(fn):
+            def f():
+                if dim.winfo_exists(): fn()
+            try: root.after(0, f)
+            except Exception: pass
+        def send(*p):
+            try:
+                with st["lock"]: st["sock"].sendall(b"".join(p))
             except Exception as e: log_err(e)
+        def go(path):
+            lbl.config(text="กำลังโหลด ...", fg=c(ACCENT))
+            pbts = path.encode("utf-8"); send(b"L", len(pbts).to_bytes(2, "little"), pbts)
+        def pull_next(ok=True):
+            if st["q"]:
+                st["i"] += 1
+                pbts = st["q"].pop(0).encode("utf-8"); send(b"G", len(pbts).to_bytes(2, "little"), pbts)
+            else:
+                n = st["n"]; st["n"] = 0
+                ui(lambda: pb.config(value=0))
+                if n and ok: ui(lambda: lbl.config(text=f"ดึงเสร็จ {n} ไฟล์ (อยู่บนเดสก์ท็อปเครื่องนี้)", fg=c(OK_C)))
+        def fill(info):
+            if info.get("error"):
+                lbl.config(text=info["error"], fg=c(DUP_C)); return
+            st.update(parent=info["parent"], items={})
+            lbl.config(text=info["path"] or "เครื่องนี้ (ไดรฟ์และโฟลเดอร์ผู้ใช้)", fg=c(ACCENT))
+            tv.delete(*tv.get_children())
+            for i, it in enumerate(info["items"]):
+                st["items"][str(i)] = (it.get("p") or ntpath.join(info["path"], it["n"]), it["d"])
+                tv.insert("", "end", iid=str(i), text=("▸ " if it["d"] else "") + it["n"],
+                          values=("" if it["d"] else fmt_size(it["s"]), time.strftime("%Y-%m-%d %H:%M", time.localtime(it["m"])) if it["m"] else ""))
+        def on_packet(p):
+            tt, d = p[:1], p[1:]
+            if tt == b"S": st["size"] = int.from_bytes(d[:8], "little")
+            elif tt == b"N":
+                if st["fh"]: st["fh"].close()
+                st["path"] = unique_path(d.decode("utf-8", "replace")); st["fh"] = open(st["path"], "wb")
+                st.update(got=0, t0=time.time(), last=0.0, nm=os.path.basename(st["path"]))
+            elif tt == b"D" and st["fh"]:
+                st["fh"].write(d); st["got"] += len(d)
+                if time.time() - st["last"] > 0.12:
+                    st["last"] = time.time(); g_, s_ = st["got"], max(st["size"], 1)
+                    txt = f"ดึง {st['i']}/{st['n']}: {st['nm']}   {fmt_size(g_)} / {fmt_size(s_)}   {fmt_size(g_ / max(time.time() - st['t0'], 0.001))}/วินาที"
+                    ui(lambda: (pb.config(value=100 * g_ / s_), lbl.config(text=txt, fg=c(ACCENT))))
+            elif tt == b"E" and st["fh"]:
+                st["fh"].close(); st["fh"] = None; pull_next()
+            elif tt == b"X":
+                if st["fh"]:
+                    st["fh"].close(); st["fh"] = None
+                    try: os.remove(st["path"])
+                    except OSError: pass
+                msg = d.decode("utf-8", "replace")
+                ui(lambda: lbl.config(text=msg, fg=c(DUP_C)))
+                pull_next(False)
+            elif tt == b"L":
+                try: info = json.loads(d.decode("utf-8"))
+                except ValueError: return
+                ui(lambda: fill(info))
+        def work(sock):
+            st["sock"] = sock
+            if not st["alive"]: return
+            ui(lambda: lbl.config(text="เชื่อมต่อแล้ว", fg=c(OK_C)))
+            send(b"L", (0).to_bytes(2, "little"))
+            try:
+                while st["alive"]:
+                    lb = recv_exact(sock, 4)
+                    if not lb: break
+                    n = int.from_bytes(lb, "little")
+                    data = recv_exact(sock, n & 0x1FFFFFFF)
+                    if not data: break
+                    if n & 0x80000000: on_packet(data)
+            finally:
+                if st["fh"]:
+                    st["fh"].close(); st["fh"] = None
+                    try: os.remove(st["path"])
+                    except OSError: pass
+        def run():
+            ok, msg = files_session(ips, work)
+            if st["alive"]: ui(lambda: lbl.config(text="ตัดการเชื่อมต่อแล้ว" if ok else msg, fg=c(DUP_C)))
+        def close():
+            st["alive"] = False
+            st["q"].clear()
+            send(b"Z")
+            try: st["sock"].close()
+            except Exception: pass
+            if dim.winfo_exists(): dim.destroy()
+        def do_pull():
+            files = [st["items"][i][0] for i in tv.selection() if len(st["items"][i][0].rstrip("\\/")) > 2]
+            if not files:
+                lbl.config(text="เลือกไฟล์หรือโฟลเดอร์ก่อน (โฟลเดอร์จะถูกบีบเป็น zip / ดึงทั้งไดรฟ์ไม่ได้)", fg=c(DUP_C)); return
+            if st["fh"] or st["q"]:
+                lbl.config(text="กำลังโอนไฟล์อยู่ รอให้เสร็จก่อน", fg=c(DUP_C)); return
+            st.update(q=list(files), n=len(files), i=0)
+            pull_next()
+        def open_sel(e=None):
+            sel = tv.selection()
+            if len(sel) == 1 and st["items"][sel[0]][1]: go(st["items"][sel[0]][0])
+            elif sel: do_pull()
+        tv.bind("<Double-1>", open_sel)
+        ttk.Button(row, text="ดึงที่เลือก", style="Go.TButton", command=do_pull).pack(side="right")
+        ttk.Button(row, text="ปิด", style="Ghost.TButton", command=close).pack(side="right", padx=8)
+        ttk.Button(row, text="เปิดโฟลเดอร์", style="Ghost.TButton", command=open_sel).pack(side="left")
+        ttk.Button(row, text="↑ ขึ้นไป", style="Ghost.TButton", command=lambda: go(st["parent"] or "")).pack(side="left", padx=8)
+        threading.Thread(target=run, daemon=True).start()
 
-    def files_open(auto=None):  # เซสชันไฟล์ในแท็บ ยังต้องรอปลายทางกดอนุญาตเหมือนเดิมทุกครั้ง
-        sel_item = tree.selection()
-        if not sel_item:
-            show_page("list")
+    def quick_admin_action(kind):  # ส่งไฟล์ (หลายเครื่องได้) / ดึงไฟล์ (ทีละเครื่อง) แบบไม่ดูจอ เป็นป็อปอัปในโปรแกรม ปลายทางยังต้องอนุญาต เว้นเครื่องที่เปิดรับอัตโนมัติ
+        if not tree.selection():
+            notify("คลิกเลือกเครื่องอื่นในรายการก่อน (เลือกหลายเครื่องได้ด้วย Ctrl/Shift)", True)
+            return
+        ts = new_only(selected_targets())
+        if not ts: return
+        if kind == "pull":
+            if len(ts) > 1:
+                notify("ดึงไฟล์เลือกได้ทีละเครื่อง", True)
+                return
+            open_pull(ts[0])
+            return
+        ps = filedialog.askopenfilenames(parent=root, title="เลือกไฟล์ที่จะส่ง")
+        if ps: run_multi_send(ts, [x for x in ps if os.path.isfile(x)])
+
+    def ask_text(title, label, cb):  # กล่องพิมพ์ข้อความ เป็นป็อปอัปในโปรแกรม ขนาดตามเนื้อหา ปุ่มไม่โดนตัด
+        dim, w, c = popup(title)
+        tk.Label(w, text=label, bg=c(PANEL), fg=c(SUBTEXT), font=FNT(13), justify="left",
+                 wraplength=max(min(S(620), root.winfo_width() - S(120)), S(240))).pack(anchor="w", padx=S(24))
+        ent = tk.Entry(w, bg=c(PANEL2), fg=c(TEXT), insertbackground=c(TEXT), relief="flat", font=FNT(15), width=30)
+        ent.pack(fill="x", padx=S(24), pady=S(14), ipady=S(8))
+        def ok():
+            t = ent.get().strip()
+            dim.destroy()
+            if t: cb(t)
+        row = tk.Frame(w, bg=c(PANEL)); row.pack(fill="x", padx=S(24), pady=(0, S(20)))
+        ttk.Button(row, text="ส่ง", style="Go.TButton", command=ok).pack(side="right")
+        ttk.Button(row, text="ยกเลิก", style="Ghost.TButton", command=dim.destroy).pack(side="right", padx=10)
+        ent.bind("<Return>", lambda e: ok())
+        ent.focus_set()
+
+    def do_message():
+        if not tree.selection():
+            notify("คลิกเลือกเครื่องอื่นในรายการก่อน", True)
+            return
+        ts = new_only(selected_targets())
+        if not ts: return
+        def go(text):
+            def bulk():
+                okn = [t[2] for t in ts if send_message(t[1], text)]
+                bad = [t[2] for t in ts if t[2] not in okn]
+                notify(f"ส่งข้อความแล้ว {len(okn)}/{len(ts)} เครื่อง" + (f" • ไม่สำเร็จ: {', '.join(bad)}" if bad else ""), bool(bad))
+            threading.Thread(target=bulk, daemon=True).start()
+        ask_text("ส่งข้อความแจ้งเตือน", f"พิมพ์ข้อความถึง {len(ts)} เครื่อง (ไม่เกิน 300 ตัวอักษร) ปลายทางจะเห็นเป็นกล่องเด้งพร้อมชื่อผู้ส่ง", go)
+
+    def show_history():
+        w = tk.Toplevel(root)
+        w.title("ประวัติการเชื่อมต่อเข้าเครื่องนี้"); w.geometry("820x480"); w.configure(bg=PANEL)
+        bar = tk.Frame(w, bg=PANEL); bar.pack(side="bottom", fill="x", padx=12, pady=10)
+        txt = tk.Text(w, bg=PANEL2, fg=TEXT, font=FNT(11), relief="flat", wrap="none", state="disabled")
+        sbv = ttk.Scrollbar(w, orient="vertical", command=txt.yview); txt.configure(yscrollcommand=sbv.set)
+        sbv.pack(side="right", fill="y", pady=(12, 0)); txt.pack(fill="both", expand=True, padx=(12, 0), pady=(12, 0))
+        def load():
+            txt.config(state="normal"); txt.delete("1.0", "end")
+            txt.insert("end", read_conn_log() or "(ยังไม่มีประวัติ — บันทึกเฉพาะการเชื่อมต่อที่เข้ามาที่เครื่องนี้)")
+            txt.see("end"); txt.config(state="disabled")
+        ttk.Button(bar, text="ปิด", style="Ghost.TButton", command=w.destroy).pack(side="right")
+        ttk.Button(bar, text="รีเฟรช", style="Accent.TButton", command=load).pack(side="right", padx=8)
+        load()
+
+    def copy_ips():
+        ips = [str(tree.item(i)["values"][3]) for i in tree.selection()]
+        if not ips:
             notify("คลิกเลือกเครื่องในรายการก่อน", True)
             return
-        uid = sel_item[0]
-        if uid == MY_ID:
-            show_page("list")
-            notify("เลือกเครื่องอื่น ไม่ใช่เครื่องตัวเอง", True)
-            return
-        ip = str(tree.item(uid)["values"][3])
-        who = str(tree.item(uid)["values"][1])
-        with peers_lock:
-            ips = [ip] + sorted(peers.get(uid, {}).get("ips", set()) - {ip})
-        files_stop()
-        tok = object()
-        files_state["tok"] = tok
-        def on_close(msg="", tok=tok):
-            if files_state["tok"] is tok: files_idle(msg)
-        for c_ in files_body.winfo_children(): c_.destroy()
-        tk.Label(files_body, text=f"กำลังเชื่อมต่อ {who} ({ip}) ... รอปลายทางกดอนุญาต (สูงสุด 60 วินาที)", bg=ecol("panel"), fg=ecol("accent"), font=FNT(13),
-                 justify="left", anchor="w", wraplength=S(520)).pack(anchor="w", padx=20, pady=20)
-        show_page("files")
-        threading.Thread(target=open_viewer, args=(ips, 1, auto, True, files_body, on_close), daemon=True).start()
-    files_idle()
-    btn_qfiles = ttk.Button(crow, text="ส่ง/ดึงไฟล์ (ไม่ดูจอ)", style="Ghost.TButton", command=lambda: files_open())
-    admin_only[btn_qfiles] = {"side": "left", "padx": 8}
-    admin_only[tabbar] = {"fill": "x", "padx": 16, "pady": (10, 0), "before": page_list}
+        root.clipboard_clear(); root.clipboard_append("\n".join(ips))
+        notify(f"คัดลอก IP แล้ว {len(ips)} รายการ")
+
+    btn_qsend = ttk.Button(crow, text="ส่งไฟล์ (ไม่ดูจอ)", style="Ghost.TButton",
+                            command=lambda: quick_admin_action("send"))
+    btn_qpull = ttk.Button(crow, text="ดึงไฟล์ (ไม่ดูจอ)", style="Ghost.TButton",
+                            command=lambda: quick_admin_action("pull"))
+    add_flow(crow, btn_qsend, True)
+    add_flow(crow, btn_qpull, True)
+
+    frm_filter = tk.Frame(right, bg=PANEL)  # ช่องค้นหา (ชื่อเครื่อง/ผู้ใช้/IP) เหนือตาราง
+    tk.Label(frm_filter, text="ค้นหา:", bg=PANEL, fg=SUBTEXT, font=FNT(12)).pack(side="left")
+    tk.Entry(frm_filter, textvariable=v_filter, bg=PANEL2, fg=TEXT, insertbackground=TEXT, relief="flat", font=FNT(12)).pack(side="left", fill="x", expand=True, padx=8, ipady=4)
+    v_filter.trace_add("write", lambda *a: refresh_loop(False))
+    lbl_detail = tk.Label(right, text="", bg=PANEL, fg=SUBTEXT, anchor="w", justify="left", wraplength=S(500), font=FNT(11))
+    def update_detail(e=None):
+        sel = tree.selection()
+        if len(sel) == 1 and tree.exists(sel[0]):
+            vals = [str(x) for x in tree.item(sel[0])["values"]]
+            lbl_detail.config(text=f"IP ทั้งหมด: {vals[6]}   •   รุ่น {vals[5]}   •   รหัสเครื่อง: {sel[0]}")
+        else:
+            lbl_detail.config(text=f"เลือกไว้ {len(sel)} เครื่อง" if sel else "")
+    tree.bind("<<TreeviewSelect>>", update_detail, add="+")
+    arow = tk.Frame(right, bg=PANEL)
+    add_flow(arow, ttk.Button(arow, text="คัดลอก IP", style="Ghost.TButton", command=copy_ips))
+    add_flow(arow, ttk.Button(arow, text="ส่งข้อความแจ้งเตือน", style="Ghost.TButton", command=do_message))
+    add_flow(arow, ttk.Button(arow, text="ประวัติการเชื่อมต่อ", style="Ghost.TButton", command=show_history))
+    admin_only[frm_filter] = {"fill": "x", "padx": 16, "pady": (0, 6), "before": tree}
+    admin_only[lbl_detail] = {"side": "bottom", "fill": "x", "padx": 16, "pady": (0, 4), "after": crow}
+    admin_only[arow] = {"side": "bottom", "fill": "x", "padx": 16, "pady": (0, 2), "after": crow}
 
     def fit_wrap(e=None):
         try:
             lw, rw_ = max(left.winfo_width() - S(60), S(180)), max(right.winfo_width() - S(60), S(180))
-            lbl_active.config(wraplength=lw); lbl_ztst.config(wraplength=lw); lbl_status.config(wraplength=rw_)
+            lbl_active.config(wraplength=lw); lbl_ztst.config(wraplength=lw); lbl_status.config(wraplength=rw_); lbl_detail.config(wraplength=rw_)
         except Exception as ex:
             log_err(ex)
     left.bind("<Configure>", fit_wrap, add="+"); right.bind("<Configure>", fit_wrap, add="+")
     _rs = [None]
     def do_rescale():
-        f = max(0.85, min(1.3, min(root.winfo_width() / 1280, root.winfo_height() / 720)))
+        f = max(0.6, min(1.3, min(root.winfo_width() / S(1280), root.winfo_height() / S(720))))
         if abs(f - SCALE[0]) < 0.04: return
         rescale_fonts(f)
         style.configure("Treeview", rowheight=int(S(46) * f))
-        fit_cols()
     def on_resize(e):
         if e.widget is not root: return
         if _rs[0]: root.after_cancel(_rs[0])
         _rs[0] = root.after(250, do_rescale)
     root.bind("<Configure>", on_resize, add="+")
     root.after(400, do_rescale)
+    root.after(300, lambda: [reflow(f) for f in list(flows)])
 
     # ---------- tray ----------
     def show_window(icon=None, item=None):

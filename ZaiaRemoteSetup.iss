@@ -1,7 +1,7 @@
-﻿[Setup]
+[Setup]
 AppId={{7C3E1B52-9A4D-4F0E-8B6A-2D5F31C9E7A4}
 AppName=ZAIA Remote Desktop
-AppVersion=1.13.0
+AppVersion=2.0
 DefaultDirName={autopf}\ZaiaRemote
 DefaultGroupName=ZAIA Remote Desktop
 SetupIconFile=zaia.ico
@@ -34,6 +34,7 @@ Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""ZAIA
 Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""ZAIA Remote"" dir=in action=allow protocol=UDP localport=47101 profile=any"; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated
 Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""ZAIA Remote"" dir=in action=allow protocol=TCP localport=47102 profile=any"; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated
 Filename: "schtasks.exe"; Parameters: "/Create /TN ""ZAIA Remote"" /TR ""\""{app}\python\pythonw.exe\"" \""{app}\ZaiaRemote.py\"" --silent"" /SC ONLOGON /RU ""BUILTIN\Users"" /RL HIGHEST /F"; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""Set-ScheduledTask -TaskName 'ZAIA Remote' -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries)"""; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated; StatusMsg: "Setting startup task..."
 Filename: "{app}\ZaiaRemote.exe"; WorkingDir: "{app}"; Description: "เปิดโปรแกรมทันที"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
