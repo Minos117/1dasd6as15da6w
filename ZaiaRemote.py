@@ -11,15 +11,19 @@ except Exception:
     TkinterDnD = None
 DND = [False]
 try:
-    import av  # H.264: ลื่นและคมกว่า JPEG ใช้เน็ตน้อยกว่า ~10 เท่า (ไม่มี -> ใช้ JPEG เหมือนเดิม)
+    import av  # H.264: ลื่นและคมกว่า JPEG ใช้เน็ตน้อยกว่า ~10 เท่า (ไม่มี/พัง -> ใช้ JPEG เหมือนเดิม)
+    if not hasattr(av, "CodecContext"):  # ติดตั้งมาไม่ครบ/ชื่อชนแพ็กเกจอื่น (เช่น "av" คนละตัว) ใช้ H.264 จริงไม่ได้
+        av = None
 except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "2.0.1"
-SETUP_REV = 1  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
+APP_VER = "3.0.0"
+SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
-DEFAULT_ZT_NETWORK_ID = "b103a835d26ef7ce"
+DEFAULT_NB_URL = "https://api.netbird.io:443"
+DEFAULT_NB_KEY = "8581F4BB-924B-458B-9777-B49B7C32B077"  # Setup Key ฝังไว้ให้เชื่อมต่ออัตโนมัติ (ถ้าเปลี่ยนใน update.json หรือหน้าตั้งค่า จะใช้ค่าใหม่แทน)
+DEFAULT_PEER_IP = "100.123.145.188"  # IP NetBird ของเครื่องปลายทางหลัก ใส่ให้ในช่อง "ต่อด้วยเลข IP"
 PORT = 47101
 JPEG_Q = 75  # ใช้เฉพาะสำรองเมื่อไม่มี H.264; ค่าคงที่ ไม่ปรับเอง
 DOC_JPEG_Q = 80  # โหมดเอกสาร: ส่วนที่เปลี่ยนมากทั้งหน้า (เลื่อนจอ) ส่งเป็น JPEG แล้วจะส่งซ้ำแบบไม่สูญเสียเมื่อจอนิ่ง
@@ -51,7 +55,7 @@ def load_config():
                 return json.load(f)
         except Exception:
             pass
-    return {"autostart": True, "zt_network_id": DEFAULT_ZT_NETWORK_ID}
+    return {"autostart": True, "nb_mgmt_url": DEFAULT_NB_URL}
 
 def save_config(cfg):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -131,7 +135,7 @@ def sha256_file(path):
         for b in iter(lambda: f.read(1 << 20), b""): h.update(b)
     return h.hexdigest()
 
-def fetch_manifest():  # update.json = {"version","files":{ชื่อไฟล์:sha256},"zt_network_id"?,"zt_leave_old"?,"setup_rev"?}
+def fetch_manifest():  # update.json = {"version","files":{ชื่อไฟล์:sha256},"nb_setup_key"?,"nb_mgmt_url"?,"setup_rev"?}
     m = json.loads(http_get(update_base() + "update.json").decode("utf-8-sig"))
     if not re.fullmatch(r"\d+(\.\d+)*", str(m.get("version", ""))) or not isinstance(m.get("files"), dict):
         raise ValueError("update.json ไม่ถูกต้อง")
@@ -184,13 +188,12 @@ def apply_staged(m, staged):
         with open(p + ".new", "wb") as f: f.write(data)
         try: os.replace(p + ".new", p)
         except OSError: moves.append((p + ".new", p))
-    zt = m.get("zt_network_id")
-    if zt and zt != cfg.get("zt_applied"):  # ปรับ ZeroTier เฉพาะตอนค่าใน update.json เปลี่ยน (ไม่ทับที่ผู้ใช้ตั้งเองถ้าค่าไม่ได้ถูกแก้)
-        old = cfg.get("zt_network_id")
-        cfg["zt_network_id"], cfg["zt_applied"] = zt, zt
+    if nb_changed(m):  # ปรับค่า NetBird เฉพาะตอนค่าใน update.json เปลี่ยน
+        u, k = nb_vals(m)
+        if u: cfg["nb_mgmt_url"] = u
+        if k: cfg["nb_setup_key"] = k
+        cfg["nb_applied"] = nb_sig((u, k))
         save_config(cfg)
-        if m.get("zt_leave_old") and old and old != zt:
-            zt_run("leave", old)
     relaunch(moves)
 
 def apply_update(data):
@@ -213,7 +216,7 @@ def task_exists():
     except Exception:
         return False
 
-# ควบคุมหน้าต่าง admin/UAC และสั่ง zerotier-cli ได้ต้องเป็น admin; ถ้าไม่ใช่ ขอสิทธิ์ 1 ครั้ง (ปฏิเสธก็ใช้ต่อได้)
+# ควบคุมหน้าต่าง admin/UAC และตั้งงานเปิดตอนเริ่มเครื่องได้ต้องเป็น admin; ถ้าไม่ใช่ ขอสิทธิ์ 1 ครั้ง (ปฏิเสธก็ใช้ต่อได้)
 def already_running():  # mutex ของตัว admin เปิดจาก user ธรรมดาไม่ได้ (error 5) = มีตัวที่รันอยู่แล้ว
     k = ctypes.windll.kernel32
     k.OpenMutexW.restype = ctypes.c_void_p
@@ -286,86 +289,110 @@ def set_autostart():
 if cfg.get("autostart", True):
     set_autostart()
 
-# ---------- ZeroTier ----------
-ZT = {"ok": False, "node": "", "cidrs": [], "msg": "กำลังตรวจสอบ ZeroTier ..."}
-zt_wake = threading.Event()
-NET_MSG = {
-    "OK": "เชื่อมต่อเครือข่ายแล้ว",
-    "ACCESS_DENIED": "รอแอดมิน approve เครื่องนี้ใน ZeroTier Central (ใช้ Node ID ด้านล่าง)",
-    "REQUESTING_CONFIGURATION": "กำลังขอค่าเครือข่าย ...",
-    "NOT_FOUND": "ไม่พบ Network ID นี้",
-}
+# ---------- NetBird ----------
+NB = {"ok": False, "ip": "", "cidrs": [], "peers": [], "det": [], "msg": "กำลังตรวจสอบ NetBird ..."}
+nb_wake = threading.Event()
 
-def zt_cli():
+def nb_cli():
     for env, dflt in (("ProgramFiles", r"C:\Program Files"), ("ProgramFiles(x86)", r"C:\Program Files (x86)")):
-        p = os.path.join(os.environ.get(env, dflt), "ZeroTier", "One", "zerotier-cli.bat")
+        p = os.path.join(os.environ.get(env, dflt), "NetBird", "netbird.exe")
         if os.path.exists(p):
             return p
     return None
 
-def zt_run(*args):
-    cli = zt_cli()
+def nb_run(*args, timeout=30):
+    cli = nb_cli()
     if not cli:
         return None
     try:
-        r = subprocess.run([cli, *args], capture_output=True, text=True, timeout=15,
-                           cwd=os.path.dirname(cli), creationflags=0x08000000)
+        r = subprocess.run([cli, *args], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout, creationflags=0x08000000)
         return ((r.stdout or "") + (r.stderr or "")).strip()
     except Exception as e:
         log_err(e)
         return ""
 
-def zt_update():
-    info = zt_run("info")
-    if info is None:
-        ZT.update(ok=False, node="", msg="ไม่พบ ZeroTier — ติดตั้งโปรแกรมใหม่ด้วยตัวติดตั้ง")
+def nb_update():
+    out = nb_run("status", "--json", timeout=15)
+    if out is None:
+        NB.update(ok=False, ip="", cidrs=[], peers=[], det=[], msg="ไม่พบ NetBird — ติดตั้งโปรแกรมใหม่ด้วยตัวติดตั้ง")
         return
-    p = info.split()
-    if len(p) < 5 or p[0] != "200":
-        hint = "" if is_admin() else " (ต้องให้ admin ปลดสิทธิ์ไฟล์ ZeroTier 1 ครั้ง: ติดตั้งทับด้วยรุ่น 1.8.2 หรือดูวิธีใน README)"
-        first = info.splitlines()[0][:80] if info else "ไม่มีผลตอบกลับ"
-        ZT.update(ok=False, node="", msg=f"ZeroTier ใช้ไม่ได้: {first}{hint}")
-        return
-    online = p[4] == "ONLINE"
-    st, ips, net_ok, cidrs = "ยังไม่ได้เข้าร่วมเครือข่าย", "", False, []
-    for line in (zt_run("listnetworks") or "").splitlines():
-        m = re.match(r"200 listnetworks (\w{16}) .* (?:[0-9a-f]{2}:){5}[0-9a-f]{2} (\w+) \w+ \S+ (\S+)", line)
-        if m and m.group(1) == cfg.get("zt_network_id", ""):
-            st = NET_MSG.get(m.group(2), m.group(2))
-            ips = "" if m.group(3) == "-" else "  IP " + m.group(3)
-            net_ok = m.group(2) == "OK"
-            cidrs = [x for x in m.group(3).split(",") if "." in x]
-    ZT.update(ok=online and net_ok, node=p[2], cidrs=cidrs,
-              msg=("" if online else "ZeroTier ออฟไลน์ (เช็กอินเทอร์เน็ต) — ") + st + ips)
-
-def zt_poll():
-    while True:
-        try: zt_update()
-        except Exception as e: log_err(e)
-        zt_wake.wait(10)
-        zt_wake.clear()
-
-def zt_grant():  # ให้ user ธรรมดาอ่าน authtoken.secret ได้ zerotier-cli จะได้ไม่ต้องใช้สิทธิ์ admin (ทำได้เฉพาะตอนเป็น admin)
     try:
-        f = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "ZeroTier", "One", "authtoken.secret")
-        if os.path.exists(f):
-            subprocess.run(["icacls", f, "/grant", "*S-1-5-32-545:R"], capture_output=True, creationflags=0x08000000, timeout=15)
-    except Exception as e:
-        log_err(e)
-
-def ensure_zerotier(network_id):
-    if not network_id:
+        j = json.loads(out)
+    except Exception:
+        first = out.splitlines()[0][:80] if out else "ไม่มีผลตอบกลับ"
+        NB.update(ok=False, ip="", cidrs=[], peers=[], det=[], msg=f"NetBird ยังไม่พร้อม/ยังไม่ได้เข้าร่วม: {first}")
         return
-    if is_admin():
-        zt_grant()
-    if not zt_cli():
-        notify("ยังไม่ได้ติดตั้ง ZeroTier — ติดตั้งโปรแกรมใหม่ด้วยตัวติดตั้ง", True)
+    me = str(j.get("netbirdIp") or "")
+    det = [d for d in ((j.get("peers") or {}).get("details") or []) if isinstance(d, dict)]
+    peers = []
+    for d in det:
+        try: peers.append(str(ipaddress.ip_interface(d.get("netbirdIp")).ip))
+        except Exception: pass
+    cidrs = []
+    try:
+        if me: cidrs = [str(ipaddress.ip_interface(me))]
+    except Exception:
+        pass
+    mg = bool((j.get("management") or {}).get("connected"))
+    up = len([d for d in det if d.get("status") == "Connected"])
+    if not mg: st = "ต่อเซิร์ฟเวอร์ NetBird ไม่ได้ (เช็กอินเทอร์เน็ต / Setup Key)"
+    elif not me: st = "ยังไม่ได้รับ IP จากเครือข่าย"
+    else: st = f"เชื่อมต่อเครือข่ายแล้ว  IP {me}  (เห็นเครื่องอื่นออนไลน์ {up}/{len(det)})"
+    NB.update(ok=bool(mg and me), ip=me, cidrs=cidrs, peers=peers, det=det, msg=st)
+
+def nb_poll():
+    while True:
+        try: nb_update()
+        except Exception as e: log_err(e)
+        nb_wake.wait(10)
+        nb_wake.clear()
+
+def nb_vals(m):  # ค่าเชื่อมต่อที่ update.json ส่งมา -> (url, key)
+    return (str((m or {}).get("nb_mgmt_url") or ""), str((m or {}).get("nb_setup_key") or ""))
+
+def nb_sig(v):
+    return hashlib.sha256("|".join(v).encode("utf-8")).hexdigest()[:16]
+
+def nb_changed(m):
+    v = nb_vals(m)
+    return any(v) and nb_sig(v) != cfg.get("nb_applied")
+
+def ensure_netbird():
+    if not nb_cli():
+        notify("ยังไม่ได้ติดตั้ง NetBird — ติดตั้งโปรแกรมใหม่ด้วยตัวติดตั้ง", True)
         return
     for _ in range(6):  # service อาจยังไม่ขึ้นหลังติดตั้งใหม่
-        if (zt_run("join", network_id) or "").startswith("200"):
-            break
+        nb_update()
+        if NB["ok"] or NB["det"] or NB["ip"]: break
+        if nb_run("status") is not None and "Daemon status" in (nb_run("status") or ""): break
         time.sleep(5)
-    zt_wake.set()
+    if NB["ok"]:
+        nb_wake.set()
+        return
+    url = cfg.get("nb_mgmt_url") or DEFAULT_NB_URL
+    key = cfg.get("nb_setup_key") or DEFAULT_NB_KEY
+    if not key:  # เครื่องใหม่: ดึง Setup Key จาก update.json (ตรวจเงียบ ไม่โหลดไฟล์โปรแกรม)
+        try:
+            u, k = nb_vals(fetch_manifest())
+            if u: cfg["nb_mgmt_url"] = url = u
+            if k: cfg["nb_setup_key"] = key = k
+            if u or k: save_config(cfg)
+        except Exception as e:
+            log_err(e)
+    if not key:
+        notify("ยังไม่มี NetBird Setup Key — ใส่ในหน้า 'ตั้งค่า'", True)
+        return
+    out = ""
+    for _ in range(3):
+        out = nb_run("up", "--management-url", url, "--setup-key", key, timeout=90) or ""
+        time.sleep(3)
+        nb_update()
+        if NB["ok"]: break
+        time.sleep(5)
+    if not NB["ok"]:
+        notify("NetBird เชื่อมต่อไม่สำเร็จ: " + (out.splitlines()[-1][:160] if out else NB["msg"]), True)
+    nb_wake.set()
 
 TASK_REV = 2
 def ensure_startup_task():  # ทุกเครื่องได้งานเปิดตอนล็อกอินแบบเดียวกัน (ลงด้วยตัวติดตั้งหรือรันจากซอร์ส) และไม่ติดเงื่อนไขแบตเตอรี่ ทำได้เฉพาะตอนเป็น admin
@@ -576,12 +603,13 @@ def handle_message_client(client, ip):
         except Exception: pass
 
 def send_presence():
-    msg = f"{HOSTNAME}|{username()}|{APP_VER}|{MY_ID}".encode("utf-8")
+    # โหมดแอดมิน (god mode): ไม่โชว์ชื่อเครื่อง/IP/รุ่นให้เครื่องอื่นเห็น เหลือแค่ชื่อผู้ใช้ -- เครื่องเราเองยังเห็นตัวเองปกติเสมอ (ไม่ผ่านบรรทัดนี้)
+    msg = f"{HOSTNAME}|{username()}|{APP_VER}|{MY_ID}|{'S' if ADMIN[0] else ''}".encode("utf-8")
     try:
         ips = socket.gethostbyname_ex(HOSTNAME)[2]
     except Exception:
         ips = []
-    for c in ZT["cidrs"]:  # IP ของ ZeroTier เอง (hostname อาจไม่คืนมาถ้าเครื่องมีการ์ดเสมือนเยอะ)
+    for c in NB["cidrs"]:  # IP ของ NetBird เอง (hostname อาจไม่คืนมาถ้าเครื่องมีการ์ดเสมือนเยอะ)
         try:
             a = str(ipaddress.ip_interface(c).ip)
             if a not in ips: ips.append(a)
@@ -595,17 +623,19 @@ def send_presence():
             s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
             s.bind((ip, 0))
             dsts = ["255.255.255.255", ip.rsplit(".", 1)[0] + ".255"]
-            sweep = []  # ส่งตรงหาทุก IP ในวง ไม่พึ่ง broadcast (ZeroTier อาจปิด/จำกัด broadcast)
-            for c in ZT["cidrs"]:
+            sweep = []  # ส่งตรงหาทุก IP ในวง ไม่พึ่ง broadcast (NetBird เป็น L3 ไม่มี broadcast)
+            for c in NB["cidrs"]:
                 try:
                     n = ipaddress.ip_network(c, strict=False)
                     if ipaddress.ip_address(ip) in n:
                         dsts.append(str(n.broadcast_address))
                         if n.num_addresses <= 1024:
                             sweep += [str(h) for h in n.hosts() if str(h) != ip]
+                        else:  # วงใหญ่ (เช่น /16) ส่งตรงเฉพาะเครื่อง (peer) ที่ NetBird รู้จัก
+                            sweep += [p for p in NB["peers"] if p != ip]
                 except Exception:
                     pass
-            if not ZT["cidrs"]:  # อ่านสถานะ ZeroTier ไม่ได้ -> เดาเป็น /24
+            if not NB["cidrs"]:  # อ่านสถานะ NetBird ไม่ได้ -> เดาเป็น /24
                 base = ip.rsplit(".", 1)[0]
                 sweep = [f"{base}.{i}" for i in range(1, 255) if f"{base}.{i}" != ip]
             for dst in dict.fromkeys(dsts + sweep):
@@ -641,11 +671,12 @@ def listener():
             host, code = f[0], f[1]
             ver = f[2] if len(f) > 2 else "เก่า"
             uid = f[3] if len(f) > 3 else host
+            stealth = len(f) > 4 and f[4] == "S"
             if uid == MY_ID:
                 continue
             with peers_lock:
                 p = peers.setdefault(uid, {"ips": set()})
-                p.update(host=host, code=code, ver=ver, last=time.time(), ip=addr[0])
+                p.update(host=host, code=code, ver=ver, last=time.time(), ip=addr[0], stealth=stealth)
                 p["ips"].add(addr[0])
         except Exception as e:
             log_err(e)
@@ -965,7 +996,7 @@ def handle_control_client(client, q=1, h264=False):
     lock = threading.Lock()
     try:
         client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 524288)  # BDP ของ ZeroTier สูง buffer ส่งเล็กเกินทำให้ความเร็วตก (ใหญ่เกินจะหน่วง)
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 524288)  # BDP ของ NetBird สูง buffer ส่งเล็กเกินทำให้ความเร็วตก (ใหญ่เกินจะหน่วง)
         grab = make_grabber()
         w, h = grab().size
         client.sendall(w.to_bytes(4, "little") + h.to_bytes(4, "little"))
@@ -978,9 +1009,11 @@ def handle_control_client(client, q=1, h264=False):
             try:
                 stream_h264(client, grab, gone, lock, maxw, fps, H264_KBPS[q])
                 return
-            except Exception as e:  # encoder ใช้ไม่ได้ (ไม่มี libx264) -> สาย TCP อาจเสียแล้ว ปิดแล้วให้ฝั่งดูต่อใหม่ (ได้ JPEG)
+            except Exception as e:
                 log_err(e)
-                return
+                # ยังไม่เคยส่งข้อมูลวิดีโอสำเร็จ (encoder พังตั้งแต่เฟรมแรก) -> ไม่ตัดสาย ส่ง JPEG ต่อในสายเดิมแทน
+                if gone.is_set():
+                    return
         slot = queue.Queue(maxsize=1)  # เก็บแค่เฟรมล่าสุด เน็ตช้าก็ทิ้งเฟรมเก่า ภาพไม่ค้างสะสม
         st = {"send": 0.0}
         def sender():
@@ -1125,13 +1158,15 @@ def handle_files_client(client):
 # ---------- viewer (client side) ----------
 ROOT = [None]
 STATUS = [None]
+STATUS2 = [None]  # แถบสถานะในหน้าตั้งค่า (หน้าตั้งค่าทับแถบสถานะหลัก)
 START = time.time()
 
 def notify(msg, bad=False):
     log_err(msg) if bad else None
     def f():
-        if STATUS[0]:
-            STATUS[0].config(text=msg, fg=("#ff5252" if bad else "#2ecc71") if ADMIN[0] else ("#c62828" if bad else "#1b7f3b"))
+        for lb in (STATUS[0], STATUS2[0]):
+            if lb:
+                lb.config(text=msg, fg=("#ff5252" if bad else "#2ecc71") if ADMIN[0] else ("#c62828" if bad else "#1b7f3b"))
     if ROOT[0]:
         ROOT[0].after(0, f)
 
@@ -1149,7 +1184,7 @@ def open_viewer(ips, q=1, auto=None, files_only=False):  # auto: None ปกต�
             sock = s
             break
         except socket.timeout:
-            fail = f"หมดเวลา: {ip} ไม่ตอบ (Firewall บล็อก / ZeroTier ยังไม่ต่อ / ปลายทางปิดอยู่)"
+            fail = f"หมดเวลา: {ip} ไม่ตอบ (Firewall บล็อก / NetBird ยังไม่ต่อ / ปลายทางปิดอยู่)"
         except ConnectionRefusedError:
             fail = f"{ip} ปฏิเสธ: โปรแกรมปลายทางไม่ได้เปิด หรือเปิดพอร์ต {CTRL_PORT} ไม่ได้"
         except Exception as e:
@@ -1548,15 +1583,14 @@ def main():
     threading.Thread(target=broadcaster, daemon=True).start()
     threading.Thread(target=control_server, daemon=True).start()
     threading.Thread(target=ping_worker, daemon=True).start()
-    threading.Thread(target=zt_poll, daemon=True).start()
+    threading.Thread(target=nb_poll, daemon=True).start()
     threading.Thread(target=ensure_firewall, daemon=True).start()
     threading.Thread(target=ensure_startup_task, daemon=True).start()
 
-    if not cfg.get("zt_network_id"):
-        cfg["zt_network_id"] = DEFAULT_ZT_NETWORK_ID
+    if not cfg.get("nb_mgmt_url"):
+        cfg["nb_mgmt_url"] = DEFAULT_NB_URL
         save_config(cfg)
-    if cfg.get("zt_network_id"):
-        threading.Thread(target=ensure_zerotier, args=(cfg["zt_network_id"],), daemon=True).start()
+    threading.Thread(target=ensure_netbird, daemon=True).start()
 
     BG      = "#f4f7fb"   # ธีมสว่าง ตัวใหญ่ อ่านง่าย
     PANEL   = "#ffffff"
@@ -1632,6 +1666,17 @@ def main():
         dim.lift()
         return dim, w, c
 
+    def ask_yes(title, msg, yes, no=None):  # กล่องยืนยันในโปรแกรม แทน messagebox (ไม่เปิดหน้าต่างแยก)
+        dim, w, c = popup(title)
+        tk.Label(w, text=msg, bg=c(PANEL), fg=c(SUBTEXT), font=FNT(13), justify="left",
+                 wraplength=max(min(S(620), root.winfo_width() - S(120)), S(240))).pack(anchor="w", padx=S(24), pady=(0, S(8)))
+        def go(f):
+            dim.destroy()
+            if f: f()
+        row = tk.Frame(w, bg=c(PANEL)); row.pack(fill="x", padx=S(24), pady=(S(8), S(20)))
+        ttk.Button(row, text="ตกลง", style="Go.TButton", command=lambda: go(yes)).pack(side="right")
+        ttk.Button(row, text="ยกเลิก", style="Ghost.TButton", command=lambda: go(no)).pack(side="right", padx=10)
+
     flows, flow_w = {}, {}  # แถวปุ่มที่ตัดบรรทัดเองตามความกว้างจอ (แท็บเล็ต/จอแคบ)
     def reflow(fr):
         ws = [w for w, a in flows[fr] if ADMIN[0] or not a]
@@ -1670,32 +1715,49 @@ def main():
 
     body = ttk.Frame(root, style="TFrame")
     body.pack(fill="both", expand=True, padx=20, pady=(6, 16))
-    body.columnconfigure(0, weight=2, minsize=S(400))
-    body.columnconfigure(1, weight=3)
+    body.columnconfigure(0, weight=1)
     body.rowconfigure(0, weight=1)
 
-    left = tk.Frame(body, bg=PANEL, highlightbackground="#223354", highlightthickness=1)
-    left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
     right = tk.Frame(body, bg=PANEL, highlightbackground="#223354", highlightthickness=1)
-    right.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+    right.grid(row=0, column=0, sticky="nsew")
 
-    def toggle_settings():
-        if left.winfo_ismapped():
-            left.grid_remove()
-            right.grid(row=0, column=0, columnspan=2, padx=0)
-        elif root.winfo_width() < S(1000):  # จอแคบ: แสดงตั้งค่าเต็มหน้าแทนที่รายชื่อ
-            right.grid_remove()
-            left.grid(row=0, column=0, columnspan=2, padx=0, sticky="nsew")
-        else:
-            left.grid()
-            right.grid(row=0, column=1, columnspan=1, padx=(8, 0))
-    ttk.Button(header, text="ตั้งค่า", style="Ghost.TButton", command=toggle_settings).pack(side="right")
-    left.grid_remove()
-    right.grid(row=0, column=0, columnspan=2, padx=0)
+    # หน้าตั้งค่า: เต็มจอทับหน้าหลักในหน้าต่างเดียว (เหมือนเมนูพักเกม ไม่ใช่หน้าต่างแยก) แบ่งเป็นการ์ดตามหัวข้อ เลื่อนด้วยนิ้ว/ล้อเมาส์ได้
+    sett = tk.Frame(root, bg=BG)
+    sbar = tk.Frame(sett, bg=BG); sbar.pack(fill="x", padx=20, pady=(14, 6))
+    ttk.Button(sbar, text="← กลับ", style="Ghost.TButton", command=lambda: sett.place_forget()).pack(side="left")
+    ttk.Label(sbar, text="ตั้งค่า", style="Header.TLabel").pack(side="left", padx=16)
+    lbl_sset = tk.Label(sett, text="", bg=BG, fg=SUBTEXT, anchor="w", justify="left", font=FNT(12), wraplength=S(700))
+    lbl_sset.pack(side="bottom", fill="x", padx=24, pady=(0, 10))
+    STATUS2[0] = lbl_sset
+    scv = tk.Canvas(sett, bg=BG, highlightthickness=0)
+    ssb = ttk.Scrollbar(sett, orient="vertical", command=scv.yview)
+    scv.configure(yscrollcommand=ssb.set)
+    ssb.pack(side="right", fill="y"); scv.pack(side="left", fill="both", expand=True)
+    left = tk.Frame(scv, bg=BG)  # ที่รวมการ์ดทั้งหมด
+    swin = scv.create_window(0, 0, window=left, anchor="nw")
+    def sfit(e=None):
+        cw = scv.winfo_width(); w_ = min(cw, S(820))
+        scv.itemconfigure(swin, width=w_); scv.coords(swin, (cw - w_) // 2, 0)
+        scv.configure(scrollregion=(0, 0, cw, max(left.winfo_reqheight(), scv.winfo_height())))
+    scv.bind("<Configure>", sfit); left.bind("<Configure>", sfit)
+    def sbind(w):  # ลากนิ้ว/เมาส์บนพื้นที่ว่างเพื่อเลื่อน ล้อเมาส์เลื่อนได้ทุกจุด
+        if not isinstance(w, (ttk.Button, tk.Checkbutton, ttk.Combobox, tk.Entry)):
+            w.bind("<ButtonPress-1>", lambda e: scv.scan_mark(0, e.y_root), add="+")
+            w.bind("<B1-Motion>", lambda e: scv.scan_dragto(0, e.y_root, gain=1), add="+")
+        w.bind("<MouseWheel>", lambda e: scv.yview_scroll(-1 if e.delta > 0 else 1, "units"), add="+")
+        for ch in w.winfo_children(): sbind(ch)
+    def open_settings():
+        sett.place(x=0, y=0, relwidth=1, relheight=1); sett.lift(); sfit()
+    ttk.Button(header, text="ตั้งค่า", style="Ghost.TButton", command=open_settings).pack(side="right")
+    def card(title):
+        f = tk.Frame(left, bg=PANEL, highlightbackground="#223354", highlightthickness=1)
+        f.pack(fill="x", padx=16, pady=(8, 4))
+        ttk.Label(f, text=title, style="Section.TLabel").pack(anchor="w", padx=16, pady=(14, 6))
+        return f
 
-    ttk.Label(left, text="ผู้ใช้งานเครื่องนี้", style="Section.TLabel").pack(anchor="w", padx=16, pady=(14, 6))
-    active_card = tk.Frame(left, bg=PANEL2, highlightbackground="#2a3c5e", highlightthickness=1)
-    active_card.pack(fill="x", padx=16)
+    sec_user = card("ผู้ใช้งานเครื่องนี้")
+    active_card = tk.Frame(sec_user, bg=PANEL2, highlightbackground="#2a3c5e", highlightthickness=1)
+    active_card.pack(fill="x", padx=16, pady=(0, 4))
     lbl_active = tk.Label(active_card, bg=PANEL2, fg=OK_C, justify="left", font=FNT(13, "bold"), anchor="w", wraplength=S(300))
     lbl_active.pack(fill="x", padx=12, pady=14)
     def refresh_active_label():
@@ -1722,7 +1784,7 @@ def main():
         v_role.trace_add("write", upd); v_unit.trace_add("write", upd); upd()
         def ok():
             if not v_role.get() or not v_unit.get():
-                messagebox.showwarning("เลือกผู้ใช้งาน", "เลือกให้ครบทั้งตำแหน่งและหน่วย", parent=root)
+                notify("เลือกให้ครบทั้งตำแหน่งและหน่วย", True)
                 return
             cfg["role"], cfg["unit"] = v_role.get(), v_unit.get()
             save_config(cfg)
@@ -1755,11 +1817,11 @@ def main():
         w.transient(root); w.grab_set()
 
     def ask_link(err):
-        v = simpledialog.askstring("ลิงก์อัปเดต", f"ดึงจากลิงก์เดิมไม่ได้\n({err})\n\nวางลิงก์ดาวน์โหลดตรงของไฟล์ ZaiaRemote.py ที่ต้องการใช้แทน", parent=root)
-        if v and v.strip():
-            cfg["update_url"] = v.strip()
+        def cb(v):
+            cfg["update_url"] = v
             save_config(cfg)
             do_update()
+        ask_text("ลิงก์อัปเดต", f"ดึงจากลิงก์เดิมไม่ได้ ({err})\nวางลิงก์ดาวน์โหลดตรงของไฟล์ ZaiaRemote.py ที่ต้องการใช้แทน", cb)
 
     def do_update(auto=False):
         if not auto: notify("กำลังตรวจสอบรุ่นใหม่ ...")
@@ -1783,10 +1845,8 @@ def main():
             if auto:
                 notify(f"มีรุ่นใหม่ v{v} — เข้า 'ตั้งค่า' แล้วกด 'ตรวจหารุ่นใหม่'")
                 return
-            zt_note = f"\nเปลี่ยนเครือข่าย ZeroTier เป็น {m['zt_network_id']}" if m and m.get("zt_network_id") and m["zt_network_id"] != cfg.get("zt_applied") else ""
+            nb_note = "\nอัปเดตค่าเชื่อมต่อ NetBird (เซิร์ฟเวอร์/Setup Key)" if m and nb_changed(m) else ""
             def ask():
-                if not messagebox.askyesno("อัปเดต", f"มีรุ่นใหม่ v{v} (ตอนนี้ v{APP_VER})\nไฟล์ที่จะเปลี่ยน: {', '.join(what) or '-'}{zt_note}\nอัปเดตและเปิดโปรแกรมใหม่ไหม"):
-                    return
                 def go():
                     try:
                         notify("กำลังดาวน์โหลดรุ่นใหม่ ...")
@@ -1794,56 +1854,66 @@ def main():
                     except Exception as e:
                         log_err(e)
                         notify(f"อัปเดตไม่สำเร็จ: {e} (ลองเปิดแบบ admin)", True)
-                threading.Thread(target=go, daemon=True).start()
+                ask_yes("อัปเดต", f"มีรุ่นใหม่ v{v} (ตอนนี้ v{APP_VER})\nไฟล์ที่จะเปลี่ยน: {', '.join(what) or '-'}{nb_note}\nอัปเดตและเปิดโปรแกรมใหม่ไหม",
+                        lambda: threading.Thread(target=go, daemon=True).start())
             root.after(0, ask)
         threading.Thread(target=work, daemon=True).start()
 
-    urow = tk.Frame(left, bg=PANEL)
+    urow = tk.Frame(sec_user, bg=PANEL)
     urow.pack(fill="x", padx=16, pady=10)
     add_flow(urow, ttk.Button(urow, text="เปลี่ยนข้อมูล", style="Ghost.TButton", command=lambda: ask_user(False)))
-    add_flow(urow, ttk.Button(urow, text="ตรวจหารุ่นใหม่", style="Ghost.TButton", command=do_update))
+    sec_upd = card("อัปเดต")
+    tk.Label(sec_upd, text=f"รุ่นที่ใช้อยู่ v{APP_VER}", bg=PANEL, fg=SUBTEXT, font=FNT(13), anchor="w").pack(fill="x", padx=16)
+    uprow = tk.Frame(sec_upd, bg=PANEL)
+    uprow.pack(fill="x", padx=16, pady=10)
+    add_flow(uprow, ttk.Button(uprow, text="ตรวจหารุ่นใหม่", style="Ghost.TButton", command=do_update))
     root.after(8000, lambda: do_update(True))
 
-    ttk.Label(left, text="การเชื่อมต่อเครือข่าย (ZeroTier)", style="Section.TLabel").pack(anchor="w", padx=16, pady=(14, 6))
-    lbl_zt = tk.Label(left, text=f"Network ID: {cfg.get('zt_network_id','') or 'ยังไม่ตั้งค่า'}", bg=PANEL, fg=SUBTEXT, justify="left", anchor="w")
+    sec_zt = card("การเชื่อมต่อเครือข่าย (NetBird)")
+    lbl_zt = tk.Label(sec_zt, text=f"เซิร์ฟเวอร์: {cfg.get('nb_mgmt_url') or DEFAULT_NB_URL}", bg=PANEL, fg=SUBTEXT, justify="left", anchor="w", wraplength=S(320), font=FNT(13))
     lbl_zt.pack(fill="x", padx=16)
     def change_zt():
-        v = simpledialog.askstring("ZeroTier", "ใส่ ZeroTier Network ID", initialvalue=cfg.get("zt_network_id",""))
-        if v:
-            cfg["zt_network_id"] = v
+        def cb(v):
+            cfg["nb_setup_key"] = v
             save_config(cfg)
-            lbl_zt.config(text=f"Network ID: {v}")
-            threading.Thread(target=ensure_zerotier, args=(v,), daemon=True).start()
+            notify("กำลังเชื่อมต่อ NetBird ใหม่ ...")
+            threading.Thread(target=ensure_netbird, daemon=True).start()
+        ask_text("NetBird", "ใส่ NetBird Setup Key", cb, "")
     def rejoin():
-        notify("กำลังเชื่อมต่อ ZeroTier ใหม่ ...")
-        threading.Thread(target=ensure_zerotier, args=(cfg.get("zt_network_id", ""),), daemon=True).start()
+        notify("กำลังเชื่อมต่อ NetBird ใหม่ ...")
+        threading.Thread(target=ensure_netbird, daemon=True).start()
     def copy_node():
-        if ZT["node"]:
+        if NB["ip"]:
             root.clipboard_clear()
-            root.clipboard_append(ZT["node"])
-            notify("คัดลอก Node ID แล้ว")
-    lbl_ztst = tk.Label(left, text="", bg=PANEL, fg=SUBTEXT, justify="left", anchor="w", wraplength=S(320))
+            root.clipboard_append(NB["ip"].split("/")[0])
+            notify("คัดลอก IP แล้ว")
+    lbl_ztst = tk.Label(sec_zt, text="", bg=PANEL, fg=SUBTEXT, justify="left", anchor="w", wraplength=S(320), font=FNT(12))
     lbl_ztst.pack(fill="x", padx=16, pady=(4, 0))
-    nrow = tk.Frame(left, bg=PANEL)
+    nrow = tk.Frame(sec_zt, bg=PANEL)
     nrow.pack(fill="x", padx=16)
-    lbl_node = tk.Label(nrow, text="", bg=PANEL, fg=SUBTEXT, anchor="w")
+    lbl_node = tk.Label(nrow, text="", bg=PANEL, fg=SUBTEXT, anchor="w", font=FNT(12))
     lbl_node.pack(side="left")
     ttk.Button(nrow, text="คัดลอก", style="Ghost.TButton", command=copy_node).pack(side="left", padx=8)
-    zrow = tk.Frame(left, bg=PANEL)
+    zrow = tk.Frame(sec_zt, bg=PANEL)
     zrow.pack(fill="x", padx=16, pady=10)
-    add_flow(zrow, ttk.Button(zrow, text="ตั้งค่า Network ID", style="Ghost.TButton", command=change_zt))
+    add_flow(zrow, ttk.Button(zrow, text="ตั้งค่า Setup Key", style="Ghost.TButton", command=change_zt))
     add_flow(zrow, ttk.Button(zrow, text="เชื่อมต่อใหม่", style="Ghost.TButton", command=rejoin))
 
-    ttk.Label(left, text="โหมดเซิร์ฟเวอร์", style="Section.TLabel").pack(anchor="w", padx=16, pady=(10, 6))
+    sec_srv = card("โหมดเซิร์ฟเวอร์")
     auto_var = tk.BooleanVar(value=bool(cfg.get("auto_allow", False)))
     def toggle_auto():
-        if auto_var.get() and not messagebox.askyesno("อนุญาตอัตโนมัติ", "ทุกเครื่องในเครือข่าย ZeroTier จะควบคุมจอเครื่องนี้ได้ทันที โดยไม่ถามก่อน\nเปิดโหมดนี้ไหม", icon="warning"):
-            auto_var.set(False)
-        cfg["auto_allow"] = auto_var.get()
-        save_config(cfg)
-    tk.Checkbutton(left, text="อนุญาตเชื่อมต่ออัตโนมัติ (ไม่มีคนนั่งหน้าเครื่อง)", variable=auto_var, command=toggle_auto,
-                   bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT,
-                   anchor="w", justify="left", wraplength=S(320)).pack(fill="x", padx=16)
+        def commit(v):
+            cfg["auto_allow"] = v
+            save_config(cfg)
+        if auto_var.get():
+            ask_yes("อนุญาตอัตโนมัติ", "ทุกเครื่องในเครือข่าย NetBird จะควบคุมจอเครื่องนี้ได้ทันที โดยไม่ถามก่อน\nเปิดโหมดนี้ไหม",
+                    lambda: commit(True), lambda: auto_var.set(False))
+        else:
+            commit(False)
+    tk.Checkbutton(sec_srv, text="อนุญาตเชื่อมต่ออัตโนมัติ (ไม่มีคนนั่งหน้าเครื่อง)", variable=auto_var, command=toggle_auto,
+                   bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT, font=FNT(13),
+                   anchor="w", justify="left", wraplength=S(520)).pack(fill="x", padx=16, pady=(0, 14))
+    sbind(left)
 
     rhead = tk.Frame(right, bg=PANEL)
     rhead.pack(fill="x", padx=16, pady=(14, 6))
@@ -1864,6 +1934,9 @@ def main():
             notify("เลือกเครื่องอื่น ไม่ใช่เครื่องตัวเอง", True)
             return
         ip = str(tree.item(uid)["values"][3])
+        if ip == "-":
+            notify("เครื่องนี้ซ่อนอยู่ (โหมดแอดมิน) เชื่อมต่อจากรายการนี้ไม่ได้", True)
+            return
         with peers_lock:
             ips = [ip] + sorted(peers.get(uid, {}).get("ips", set()) - {ip})
         who = str(tree.item(uid)["values"][1])
@@ -1872,9 +1945,8 @@ def main():
     lbl_status.pack(side="bottom", fill="x", padx=16, pady=(0, 12))
     STATUS[0] = lbl_status
     def connect_ip():
-        v = simpledialog.askstring("เชื่อมต่อด้วย IP", "ใส่ IP ของเครื่องปลายทาง (IP ZeroTier)")
-        if v and v.strip():
-            ask_quality(v.strip(), lambda q: threading.Thread(target=open_viewer, args=([v.strip()], q), daemon=True).start())
+        ask_text("เชื่อมต่อด้วย IP", "ใส่ IP ของเครื่องปลายทาง (IP NetBird)",
+                 lambda v: ask_quality(v, lambda q: threading.Thread(target=open_viewer, args=([v], q), daemon=True).start()), DEFAULT_PEER_IP)
     crow = tk.Frame(right, bg=PANEL)
     crow.pack(side="bottom", fill="x", padx=16, pady=12)
     add_flow(crow, ttk.Button(crow, text="ดูจอเครื่องที่เลือก", style="Go.TButton", command=do_connect))
@@ -1903,6 +1975,7 @@ def main():
     tree.bind("<Configure>", fit_cols, add="+")
     tree.pack(fill="both", expand=True, padx=16)
     tree.tag_configure("dup", foreground="#b36200")
+    tree.tag_configure("stealth", foreground="#8fa3c4")
     tree.tag_configure("ok", foreground=OK_C)
     tree.tag_configure("me", foreground=ACCENT)
     tree.bind("<Double-1>", lambda e: do_connect())
@@ -1922,26 +1995,34 @@ def main():
         flt = v_filter.get().strip().lower() if ADMIN[0] else ""
         n_behind = 0
         tree.delete(*tree.get_children())
-        for k in sorted(all_m, key=lambda x: (all_m[x]["host"].lower(), x)):
+        def sort_key(x):
+            vv = all_m[x]
+            stealth = vv.get("stealth") and x != MY_ID
+            return ((vv["code"] if stealth else vv["host"]).lower(), x)
+        for k in sorted(all_m, key=sort_key):
             v = all_m[k]
-            ips_txt = "127.0.0.1" if k == MY_ID else ", ".join(sorted(v.get("ips") or {v["ip"]}))
-            old = is_old(v["ver"])
-            behind = (not old) and ver_tuple(v["ver"]) < ver_tuple(APP_VER)
+            stealth = bool(v.get("stealth")) and k != MY_ID  # เครื่องตัวเอง (MY_ID) ไม่ถูกบังข้อมูลเด็ดขาด
+            ips_txt = "127.0.0.1" if k == MY_ID else ("-" if stealth else ", ".join(sorted(v.get("ips") or {v["ip"]})))
+            old = (not stealth) and is_old(v["ver"])
+            behind = (not stealth) and (not old) and ver_tuple(v["ver"]) < ver_tuple(APP_VER)
             n_behind += 1 if (old or behind) else 0
             if flt and flt not in f'{v["host"]} {v["code"]} {ips_txt}'.lower(): continue
-            tag = "me" if k == MY_ID else "dup" if (old or behind) else "ok"
+            tag = "me" if k == MY_ID else "stealth" if stealth else "dup" if (old or behind) else "ok"
             who = f"(รุ่นเก่า รหัส {v['code']})" if old else v["code"]
-            status = "รุ่นเก่า" if old else "ควรอัปเดต" if behind else "ปกติ"
+            status = "รุ่นเก่า" if old else "ควรอัปเดต" if behind else "ผู้ดูแลระบบ" if stealth else "ปกติ"
+            host_disp = "•" if stealth else v["host"]
+            ip_disp = "-" if stealth else v["ip"]
+            ver_disp = "-" if stealth else v["ver"]
             pg = PING.get(v["ip"])
-            ptxt = "-" if (k == MY_ID or pg is None) else (f"{pg} ms" if pg >= 0 else "✗")
-            tree.insert("", "end", iid=k, values=(v["host"], who, status, v["ip"], ptxt, v["ver"], ips_txt), tags=(tag,))
+            ptxt = "-" if (k == MY_ID or stealth or pg is None) else (f"{pg} ms" if pg >= 0 else "✗")
+            tree.insert("", "end", iid=k, values=(host_disp, who, status, ip_disp, ptxt, ver_disp, ips_txt), tags=(tag,))
 
         keep = [i for i in old_sel if tree.exists(i)]
         if keep:
             tree.selection_set(keep)
         lbl_peers.config(text=f"เครื่องที่เปิดใช้งานอยู่ ({len(all_m)})" + (f" • ควรอัปเดต {n_behind}" if ADMIN[0] and n_behind else ""))
-        lbl_ztst.config(text=ZT["msg"], fg=OK_C if ZT["ok"] else DUP_C)
-        lbl_node.config(text=f"Node ID: {ZT['node'] or '-'}")
+        lbl_ztst.config(text=NB["msg"], fg=OK_C if NB["ok"] else DUP_C)
+        lbl_node.config(text=f"IP เครื่องนี้: {NB['ip'].split('/')[0] or '-'}")
         state = len(all_m) > 1 or time.time() - START < 15
         if state != hint[0]:
             hint[0] = state
@@ -1954,23 +2035,23 @@ def main():
         notify("กำลังตรวจปัญหา ...")
         L = []
         def run():
-            L[:] = [f"โปรแกรม v{APP_VER}   สิทธิ์ admin: {'ใช่' if is_admin() else 'ไม่ใช่ (ใช้ได้ ถ้า ZeroTier ปลดสิทธิ์ไฟล์แล้ว)'}"]
+            L[:] = [f"โปรแกรม v{APP_VER}   สิทธิ์ admin: {'ใช่' if is_admin() else 'ไม่ใช่ (ใช้งานได้ตามปกติ)'}"]
             good = lambda t: L.append("✔ " + t)
             bad = lambda t: L.append("✘ " + t)
-            try: zt_update()
+            try: nb_update()
             except Exception as e: log_err(e)
-            if not zt_cli():
-                bad("ไม่พบ ZeroTier → ติดตั้งโปรแกรมใหม่ด้วยตัวติดตั้ง")
-            elif not ZT["node"]:
-                bad("ZeroTier ใช้ไม่ได้: " + ZT["msg"])
+            if not nb_cli():
+                bad("ไม่พบ NetBird → ติดตั้งโปรแกรมใหม่ด้วยตัวติดตั้ง")
+            elif not NB["ip"]:
+                bad("NetBird ใช้ไม่ได้: " + NB["msg"])
             else:
-                (good if ZT["ok"] else bad)("ZeroTier: " + ZT["msg"])
-                leaf = [l for l in (zt_run("peers") or "").splitlines() if " LEAF " in l]
-                if leaf:
-                    good(f"เห็นเครื่อง ZeroTier อื่น {len(leaf)} เครื่อง")
-                    nd = len([l for l in leaf if " DIRECT " in l])
-                    (good if nd else bad)(f"เส้นทางตรง (DIRECT) {nd}/{len(leaf)} เครื่อง" + ("" if nd else " → ตอนนี้อ้อมผ่านเซิร์ฟเวอร์ ภาพจะช้า/กระตุก เช็ก NAT/Firewall ของ router"))
-                else: bad("ไม่เห็นเครื่อง ZeroTier อื่นเลย → อีกเครื่องปิดอยู่ / ZeroTier ไม่ทำงาน / ยังไม่ติ๊ก Auth ใน Central")
+                (good if NB["ok"] else bad)("NetBird: " + NB["msg"])
+                up = [d for d in NB["det"] if d.get("status") == "Connected"]
+                if up:
+                    good(f"เห็นเครื่อง NetBird อื่นออนไลน์ {len(up)}/{len(NB['det'])} เครื่อง")
+                    nd = len([d for d in up if str(d.get("connectionType", "")).lower() == "p2p"])
+                    (good if nd else bad)(f"เส้นทางตรง (P2P) {nd}/{len(up)} เครื่อง" + ("" if nd else " → ตอนนี้อ้อมผ่าน Relay ภาพจะช้า/กระตุก เช็ก NAT/Firewall ของ router"))
+                else: bad("ไม่เห็นเครื่อง NetBird อื่นออนไลน์ → อีกเครื่องปิดอยู่ / NetBird ไม่ทำงาน / ติด Policy (ACL) ใน Dashboard")
             if PORT_OK["udp"]: good(f"พอร์ตค้นหา UDP {PORT} เปิดรับได้")
             else: bad(f"เปิดพอร์ต UDP {PORT} ไม่ได้ → มีโปรแกรมนี้เปิดซ้ำ/โปรแกรมอื่นใช้พอร์ต")
             if PORT_OK["tcp"]: good(f"พอร์ตรับสาย TCP {CTRL_PORT} เปิดรับได้")
@@ -2033,7 +2114,7 @@ def main():
 
     def refresh_now(e=None):
         threading.Thread(target=send_presence, daemon=True).start()
-        zt_wake.set()
+        nb_wake.set()
         refresh_loop(False)
         notify("รีเฟรชแล้ว")
     root.bind("<F5>", refresh_now)
@@ -2309,12 +2390,13 @@ def main():
         ps = filedialog.askopenfilenames(parent=root, title="เลือกไฟล์ที่จะส่ง")
         if ps: run_multi_send(ts, [x for x in ps if os.path.isfile(x)])
 
-    def ask_text(title, label, cb):  # กล่องพิมพ์ข้อความ เป็นป็อปอัปในโปรแกรม ขนาดตามเนื้อหา ปุ่มไม่โดนตัด
+    def ask_text(title, label, cb, initial=""):  # กล่องพิมพ์ข้อความ เป็นป็อปอัปในโปรแกรม ขนาดตามเนื้อหา ปุ่มไม่โดนตัด
         dim, w, c = popup(title)
         tk.Label(w, text=label, bg=c(PANEL), fg=c(SUBTEXT), font=FNT(13), justify="left",
                  wraplength=max(min(S(620), root.winfo_width() - S(120)), S(240))).pack(anchor="w", padx=S(24))
         ent = tk.Entry(w, bg=c(PANEL2), fg=c(TEXT), insertbackground=c(TEXT), relief="flat", font=FNT(15), width=30)
         ent.pack(fill="x", padx=S(24), pady=S(14), ipady=S(8))
+        ent.insert(0, initial)
         def ok():
             t = ent.get().strip()
             dim.destroy()
@@ -2392,7 +2474,7 @@ def main():
 
     def fit_wrap(e=None):
         try:
-            lw, rw_ = max(left.winfo_width() - S(60), S(180)), max(right.winfo_width() - S(60), S(180))
+            lw, rw_ = max(left.winfo_width() - S(110), S(180)), max(right.winfo_width() - S(60), S(180))
             lbl_active.config(wraplength=lw); lbl_ztst.config(wraplength=lw); lbl_status.config(wraplength=rw_); lbl_detail.config(wraplength=rw_)
         except Exception as ex:
             log_err(ex)

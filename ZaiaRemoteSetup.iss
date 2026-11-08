@@ -1,7 +1,7 @@
 [Setup]
 AppId={{7C3E1B52-9A4D-4F0E-8B6A-2D5F31C9E7A4}
 AppName=ZAIA Remote Desktop
-AppVersion=2.0.1
+AppVersion=3.0.0
 DefaultDirName={autopf}\ZaiaRemote
 DefaultGroupName=ZAIA Remote Desktop
 SetupIconFile=zaia.ico
@@ -20,7 +20,7 @@ Source: "ZaiaRemote.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "ZaiaRemote.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "zaia.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "zaia_logo.png"; DestDir: "{app}"; Flags: ignoreversion
-Source: "ZeroTierOne.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: not ZtInstalled
+Source: "netbird_installer_0_82_0_windows_amd64.msi"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: not NbInstalled
 Source: "python\*"; DestDir: "{app}\python"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
@@ -28,8 +28,9 @@ Name: "{group}\ZAIA Remote Desktop"; Filename: "{app}\ZaiaRemote.exe"; WorkingDi
 Name: "{commondesktop}\ZAIA Remote Desktop"; Filename: "{app}\ZaiaRemote.exe"; WorkingDir: "{app}"; IconFilename: "{app}\zaia.ico"
 
 [Run]
-Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\ZeroTierOne.msi"" /qn /norestart"; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated; Check: not ZtInstalled; StatusMsg: "Installing ZeroTier..."
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -Command ""$f='{commonappdata}\ZeroTier\One\authtoken.secret'; for($i=0;$i -lt 40 -and !(Test-Path $f);$i++){{Start-Sleep 1}; if(Test-Path $f){{icacls $f /grant '*S-1-5-32-545:R'}"""; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated; StatusMsg: "Setting ZeroTier permission..."
+Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\netbird_installer_0_82_0_windows_amd64.msi"" /qn /norestart"; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated; Check: not NbInstalled; StatusMsg: "Installing NetBird..."
+Filename: "{commonpf}\NetBird\netbird.exe"; Parameters: "service start"; WorkingDir: "{commonpf}\NetBird"; Flags: runhidden waituntilterminated; StatusMsg: "Starting NetBird..."
+Filename: "{commonpf}\NetBird\netbird.exe"; Parameters: "up --management-url https://api.netbird.io:443 --setup-key 8581F4BB-924B-458B-9777-B49B7C32B077"; WorkingDir: "{commonpf}\NetBird"; Flags: runhidden nowait
 Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""ZAIA Remote"""; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated
 Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""ZAIA Remote"" dir=in action=allow protocol=UDP localport=47101 profile=any"; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated
 Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""ZAIA Remote"" dir=in action=allow protocol=TCP localport=47102 profile=any"; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated
@@ -45,7 +46,7 @@ Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""ZAIA
 Type: filesandordirs; Name: "{app}\python"
 
 [Code]
-function ZtInstalled: Boolean;
+function NbInstalled: Boolean;
 begin
-  Result := FileExists(ExpandConstant('{commonpf}\ZeroTier\One\zerotier-cli.bat'));
+  Result := FileExists(ExpandConstant('{commonpf}\NetBird\netbird.exe'));
 end;
