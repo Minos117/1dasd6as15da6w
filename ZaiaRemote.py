@@ -16,7 +16,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "2.0"
+APP_VER = "2.0.1"
 SETUP_REV = 1  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_ZT_NETWORK_ID = "b103a835d26ef7ce"
@@ -549,6 +549,13 @@ def send_message(ips, text):  # ข้อความแจ้งเตือน
             continue
     return False
 
+def peer_user(ip):  # ชื่อผู้ใช้ (username) ของเครื่องที่ส่งมา ไม่มีชื่อเครื่องหรือ IP
+    with peers_lock:
+        for v in peers.values():
+            if ip == v.get("ip") or ip in v.get("ips", ()):
+                return v.get("code", "")
+    return ""
+
 _msg_last = {}
 def handle_message_client(client, ip):
     try:
@@ -561,7 +568,7 @@ def handle_message_client(client, ip):
         _msg_last[ip] = now
         who = peer_name(ip) or ip
         conn_log(f"{ip} {who} | ส่งข้อความแจ้งเตือนมา: {text[:80]}")
-        ctypes.windll.user32.MessageBoxW(0, f"{text}\n\n— จาก {who} (IP {ip})", "ข้อความจาก ZAIA Remote", 0x40 | 0x40000 | 0x10000)
+        ctypes.windll.user32.MessageBoxW(0, f"{text}\n\n— จาก {peer_user(ip) or 'ไม่ทราบชื่อผู้ใช้'}", "ข้อความจาก ZAIA Remote", 0x40 | 0x40000 | 0x10000)
     except Exception as e:
         log_err(e)
     finally:
