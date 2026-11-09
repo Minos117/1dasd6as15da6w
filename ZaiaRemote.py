@@ -18,11 +18,11 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "3.0.0"
+APP_VER = "3.1.1"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
-DEFAULT_NB_KEY = "8581F4BB-924B-458B-9777-B49B7C32B077"  # Setup Key ฝังไว้ให้เชื่อมต่ออัตโนมัติ (ถ้าเปลี่ยนใน update.json หรือหน้าตั้งค่า จะใช้ค่าใหม่แทน)
+DEFAULT_NB_KEY = "8D691314-64C7-458B-9F4E-F6A5E8CC2FC8"  # Setup Key ฝังไว้ให้เชื่อมต่ออัตโนมัติ (ถ้าเปลี่ยนใน update.json หรือหน้าตั้งค่า จะใช้ค่าใหม่แทน)
 DEFAULT_PEER_IP = "100.123.145.188"  # IP NetBird ของเครื่องปลายทางหลัก ใส่ให้ในช่อง "ต่อด้วยเลข IP"
 PORT = 47101
 JPEG_Q = 75  # ใช้เฉพาะสำรองเมื่อไม่มี H.264; ค่าคงที่ ไม่ปรับเอง
@@ -708,6 +708,58 @@ def peer_name(ip):
                 return f"{v.get('host','')} ({v.get('code','')})"
     return ""
 
+def peer_code(ip):  # ชื่อสั้น (ตำแหน่ง+หน่วย หรือชื่อที่ตั้งเอง) สำหรับป้ายแจ้งบนจอ ไม่เอาชื่อเครื่องเพราะอ่านไม่รู้เรื่อง
+    with peers_lock:
+        for v in peers.values():
+            if ip == v.get("ip") or ip in v.get("ips", ()):
+                return v.get("code") or ip
+    return ip
+
+WATCHER = {"win": None, "names": []}  # ป้ายลอยมุมบนซ้าย บอกว่าใครกำลังดู/คุมจอเราอยู่ (เห็นทุกโปรแกรม หายเมื่อไม่มีใครต่อแล้ว)
+
+def _watcher_render():
+    names = WATCHER["names"]
+    if not names:
+        if WATCHER["win"]:
+            try: WATCHER["win"].destroy()
+            except Exception: pass
+            WATCHER["win"] = None
+        return
+    txt = "\U0001F441  " + ", ".join(names) + "  กำลังดูจอนี้"
+    if WATCHER["win"]:
+        try:
+            WATCHER["win"].lbl.config(text=txt)
+            return
+        except Exception:
+            WATCHER["win"] = None
+    r = ROOT[0]
+    if not r:
+        return
+    w = tk.Toplevel(r)
+    w.overrideredirect(True)
+    try: w.attributes("-topmost", True)
+    except Exception: pass
+    try: w.attributes("-alpha", 0.93)
+    except Exception: pass
+    w.configure(bg="#c62828")
+    lbl = tk.Label(w, text=txt, bg="#c62828", fg="#ffffff", font=("Tahoma", 12, "bold"), padx=12, pady=5)
+    lbl.pack()
+    w.lbl = lbl
+    w.geometry("+8+8")
+    WATCHER["win"] = w
+
+def watcher_add(name):
+    if ROOT[0]:
+        ROOT[0].after(0, lambda: (WATCHER["names"].append(name or "ไม่ทราบชื่อ"), _watcher_render()))
+
+def watcher_remove(name):
+    if ROOT[0]:
+        def f():
+            if name in WATCHER["names"]:
+                WATCHER["names"].remove(name)
+            _watcher_render()
+        ROOT[0].after(0, f)
+
 def control_server():
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -726,23 +778,31 @@ def control_server():
             try: hello = client.recv(1)
             except socket.timeout: hello = None
             except Exception: hello = b""
-            q, h264 = 1, False
+            q, h264, mon_idx = 1, False, 1
             if hello == b"V":  # 1.6 ส่งระดับคุณภาพต่อท้าย (0-2); รุ่น 1.5 ไม่ส่ง ใช้ค่ากลาง
                 try:
                     client.settimeout(0.5)
                     qb = client.recv(1)
                     if qb and qb[0] < len(QUALITY): q = qb[0]
                     h264 = client.recv(1) == b"H"  # 1.8.4 ขึ้นไปบอกว่าถอดรหัส H.264 ได้
+                    mb = client.recv(1)  # 3.1.0 ขึ้นไปส่งเลขจอที่เลือก (1=จอหลัก); รุ่นเก่าไม่ส่ง -> ใช้จอหลัก
+                    if mb and mb[0] >= 1: mon_idx = mb[0]
                 except Exception:
                     pass
             client.settimeout(None)
             if hello == b"N":  # ข้อความแจ้งเตือน (รุ่น 1.13.0+)
                 threading.Thread(target=handle_message_client, args=(client, addr[0]), daemon=True).start()
                 continue
+            if hello == b"M":  # นับจำนวนจอ (3.1.0+) แค่ข้อมูลเฉยๆ ไม่เข้าจอ ไม่ต้องขออนุญาต
+                try: client.sendall(bytes([monitor_count()]))
+                except Exception: pass
+                client.close()
+                continue
             if hello == b"P" or hello == b"":
                 client.close()
                 continue
-            ans = 6 if cfg.get("auto_allow") else ctypes.windll.user32.MessageBoxW(0, (peer_name(addr[0]) + "\n" if peer_name(addr[0]) else "") + f"IP {addr[0]}\n\n" + ("ขอส่ง/ดึงไฟล์ในเครื่องนี้ (ไม่ดูจอ) อนุญาตไหม" if hello == b"T" else "ขอเข้ามาดูและควบคุมจอเครื่องนี้ อนุญาตไหม") + "\n(ถ้าไม่รู้จัก ให้กดไม่อนุญาต)", "มีคนขอส่ง/ดึงไฟล์" if hello == b"T" else "มีคนขอเข้ามาช่วยดูจอ", 0x04 | 0x20 | 0x100 | 0x40000)
+            pname = peer_name(addr[0])
+            ans = 6 if cfg.get("auto_allow") else ctypes.windll.user32.MessageBoxW(0, (pname + "\n" if pname else "") + f"IP {addr[0]}\n\n" + ("ขอส่ง/ดึงไฟล์ในเครื่องนี้ (ไม่ดูจอ) อนุญาตไหม" if hello == b"T" else "ขอเข้ามาดูและควบคุมจอเครื่องนี้ อนุญาตไหม") + "\n(ถ้าไม่รู้จัก ให้กดไม่อนุญาต)", "มีคนขอส่ง/ดึงไฟล์" if hello == b"T" else "มีคนขอเข้ามาช่วยดูจอ", 0x04 | 0x20 | 0x100 | 0x40000)
             conn_log(f"{addr[0]} {peer_name(addr[0])} | ขอ{'ส่ง/ดึงไฟล์ (ไม่ดูจอ)' if hello == b'T' else 'ดูจอ/ควบคุม'} | "
                      + ("อนุญาตอัตโนมัติ" if cfg.get("auto_allow") else "อนุญาต" if ans == 6 else "ปฏิเสธ"))
             if ans != 6:  # IDYES
@@ -751,7 +811,7 @@ def control_server():
             if hello == b"T":  # โหมดไฟล์อย่างเดียว (ไม่จับภาพ ไม่รับเมาส์/คีย์บอร์ด) ยังต้องผ่านกล่องอนุญาตเหมือนเดิม
                 threading.Thread(target=handle_files_client, args=(client,), daemon=True).start()
             else:
-                threading.Thread(target=handle_control_client, args=(client, q, h264 and av is not None), daemon=True).start()
+                threading.Thread(target=handle_control_client, args=(client, q, h264 and av is not None, mon_idx, peer_code(addr[0])), daemon=True).start()
         except Exception as e:
             log_err(e)
 
@@ -769,11 +829,19 @@ def unique_path(name):
         i += 1
     return p
 
-def make_grabber():
+def monitor_count():  # จำนวนจอจริงของเครื่องนี้ (ไม่รวม index 0 ที่ mss ใช้แทน "ทุกจอรวมกัน")
+    try:
+        import mss
+        with mss.mss() as sct:
+            return max(1, min(250, len(sct.monitors) - 1))
+    except Exception:
+        return 1
+
+def make_grabber(mon_idx=1):
     try:
         import mss
         sct = mss.mss()
-        mon = sct.monitors[1]
+        mon = sct.monitors[mon_idx] if 1 <= mon_idx < len(sct.monitors) else sct.monitors[1]
         st = {"prev": None, "n": 0}
         def raw():  # คืน (ขนาด, bytes BGRA) ไม่แปลงเป็นภาพ PIL (แปลงช้า); เทียบกับเฟรมก่อนด้วย memcmp
             sh = sct.grab(mon)
@@ -990,14 +1058,15 @@ def stream_rects(client, grab, gone, lock, fps):  # โหมดเอกสา�
         if nxt > now: time.sleep(nxt - now)
         elif now - nxt > iv: nxt = now
 
-def handle_control_client(client, q=1, h264=False):
+def handle_control_client(client, q=1, h264=False, mon_idx=1, who=""):
     maxw, fps, _ = QUALITY[q]
     if maxw == 0: maxw = 1 << 16
     lock = threading.Lock()
+    watcher_add(who)
     try:
         client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 524288)  # BDP ของ NetBird สูง buffer ส่งเล็กเกินทำให้ความเร็วตก (ใหญ่เกินจะหน่วง)
-        grab = make_grabber()
+        grab = make_grabber(mon_idx)
         w, h = grab().size
         client.sendall(w.to_bytes(4, "little") + h.to_bytes(4, "little"))
         gone = threading.Event()
@@ -1064,6 +1133,7 @@ def handle_control_client(client, q=1, h264=False):
     except Exception as e:
         log_err(e)
     finally:
+        watcher_remove(who)
         try: client.close()
         except Exception: pass
 
@@ -1170,7 +1240,7 @@ def notify(msg, bad=False):
     if ROOT[0]:
         ROOT[0].after(0, f)
 
-def open_viewer(ips, q=1, auto=None, files_only=False):  # auto: None ปกติ, "send"/"pull" = เปิดแล้วเด้งกล่องส่ง/ดึงไฟล์ให้เลย (โหมดแอดมิน)
+def open_viewer(ips, q=1, auto=None, files_only=False, mon=1):  # auto: None ปกติ, "send"/"pull" = เปิดแล้วเด้งกล่องส่ง/ดึงไฟล์ให้เลย (โหมดแอดมิน); mon: จอปลายทางที่เลือก (1=จอหลัก)
     sock, fail = None, ""
     for ip in ips:
         notify(f"กำลังเชื่อมต่อ {ip} ...")
@@ -1180,7 +1250,7 @@ def open_viewer(ips, q=1, auto=None, files_only=False):  # auto: None ปกต�
         s.settimeout(5)
         try:
             s.connect((ip, CTRL_PORT))
-            s.sendall(b"T" if files_only else b"V" + bytes([q]) + (b"H" if av is not None else b"-"))
+            s.sendall(b"T" if files_only else b"V" + bytes([q]) + (b"H" if av is not None else b"-") + bytes([max(1, min(250, mon))]))
             sock = s
             break
         except socket.timeout:
@@ -1796,7 +1866,20 @@ def main():
         if not first: ttk.Button(row, text="ยกเลิก", style="Ghost.TButton", command=dim.destroy).pack(side="right", padx=10)
         dim.lift(); w.grab_set(); w.focus_set(); root.wait_window(dim)
 
-    def ask_quality(who, go):
+    def probe_monitors(ip):  # ถามจำนวนจอของปลายทางแบบเงียบๆ (ไม่เข้าจอ ไม่ต้องขออนุญาต) ก่อนเปิดกล่องเลือกคุณภาพ
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(2)
+            s.connect((ip, CTRL_PORT))
+            s.sendall(b"M")
+            n = s.recv(1)
+            s.close()
+            return max(1, n[0]) if n else 1
+        except Exception:
+            return 1
+
+    def ask_quality(who, go, ip=None):
+        n_mon = probe_monitors(ip) if ip else 1
         w = tk.Toplevel(root)
         w.title("เลือกคุณภาพภาพ")
         w.configure(bg=PANEL)
@@ -1808,8 +1891,15 @@ def main():
                          (1, "กลาง  1080p 30fps (วิดีโอ)"), (2, "สูงสุด  1080p 60fps (วิดีโอ ใช้เน็ตและเครื่องแรง)")):
             tk.Radiobutton(w, text=txt, variable=v, value=val, bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL,
                            activeforeground=TEXT, anchor="w").pack(fill="x", padx=20, pady=2)
+        mv = tk.IntVar(value=1)
+        if n_mon > 1:  # ปลายทางมีหลายจอ -> เลือกจอครั้งเดียวตอนนี้เลย (เปลี่ยนจอกลางทางไม่รองรับ ต้องตัดต่อใหม่)
+            tk.Frame(w, bg=PANEL2, height=1).pack(fill="x", padx=20, pady=8)
+            tk.Label(w, text=f"ปลายทางมี {n_mon} จอ เลือกจอที่จะดู", bg=PANEL, fg=TEXT, font=FNT(13, "bold")).pack(anchor="w", padx=20)
+            for i in range(1, n_mon + 1):
+                tk.Radiobutton(w, text=f"จอหลัก" if i == 1 else f"จอที่ {i}", variable=mv, value=i, bg=PANEL, fg=TEXT,
+                               selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT, anchor="w").pack(fill="x", padx=20, pady=2)
         def ok():
-            q = v.get(); cfg["quality"] = q; save_config(cfg); w.destroy(); go(q)
+            q = v.get(); cfg["quality"] = q; save_config(cfg); w.destroy(); go(q, mv.get())
         row = tk.Frame(w, bg=PANEL); row.pack(fill="x", padx=20, pady=16)
         ttk.Button(row, text="เชื่อมต่อ", style="Accent.TButton", command=ok).pack(side="right")
         ttk.Button(row, text="ยกเลิก", style="Ghost.TButton", command=w.destroy).pack(side="right", padx=8)
@@ -1940,13 +2030,13 @@ def main():
         with peers_lock:
             ips = [ip] + sorted(peers.get(uid, {}).get("ips", set()) - {ip})
         who = str(tree.item(uid)["values"][1])
-        ask_quality(who, lambda q: threading.Thread(target=open_viewer, args=(ips, q), daemon=True).start())
+        ask_quality(who, lambda q, mon: threading.Thread(target=open_viewer, args=(ips, q, None, False, mon), daemon=True).start(), ip=ip)
     lbl_status = tk.Label(right, text="พร้อมใช้งาน", bg=PANEL, fg=SUBTEXT, anchor="w", justify="left", wraplength=S(340))
     lbl_status.pack(side="bottom", fill="x", padx=16, pady=(0, 12))
     STATUS[0] = lbl_status
     def connect_ip():
         ask_text("เชื่อมต่อด้วย IP", "ใส่ IP ของเครื่องปลายทาง (IP NetBird)",
-                 lambda v: ask_quality(v, lambda q: threading.Thread(target=open_viewer, args=([v], q), daemon=True).start()), DEFAULT_PEER_IP)
+                 lambda v: ask_quality(v, lambda q, mon: threading.Thread(target=open_viewer, args=([v], q, None, False, mon), daemon=True).start(), ip=v), DEFAULT_PEER_IP)
     crow = tk.Frame(right, bg=PANEL)
     crow.pack(side="bottom", fill="x", padx=16, pady=12)
     add_flow(crow, ttk.Button(crow, text="ดูจอเครื่องที่เลือก", style="Go.TButton", command=do_connect))
