@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "3.1.1"
+APP_VER = "3.1.2"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -2302,21 +2302,31 @@ def main():
         ent.bind("<Return>", lambda e: ok())
         dim.lift(); w.grab_set(); ent.focus_set()
 
-    def selected_targets():  # [(uid, [ip ...], ชื่อเครื่อง, รุ่น)] ไม่รวมเครื่องตัวเอง
+    def selected_targets():  # [(uid, [ip ...], ชื่อเครื่อง, รุ่นจริง, ซ่อนอยู่ไหม)] ไม่รวมเครื่องตัวเอง
         out = []
         for uid in tree.selection():
             if uid == MY_ID: continue
             vals = tree.item(uid)["values"]
-            ip = str(vals[3])
             with peers_lock:
-                ips = [ip] + sorted(peers.get(uid, {}).get("ips", set()) - {ip})
-            out.append((uid, ips, str(vals[0]), str(vals[5])))
+                p = peers.get(uid, {})
+                stealth = bool(p.get("stealth"))
+                # โหมดแอดมิน (god mode) บัง IP/รุ่นในตารางเป็น "-" ไว้เพื่อความเป็นส่วนตัว -> ต้องอ่านค่าจริงจาก peers ไม่ใช่จากตารางที่โชว์ ไม่งั้นเช็กรุ่น/ต่อ IP ผิดเสมอ
+                ip = p.get("ip") or str(vals[3])
+                ips = [ip] + sorted(p.get("ips", set()) - {ip})
+                ver = p.get("ver") or str(vals[5])
+                # ตารางโชว์ชื่อเครื่องเป็น "•" ตอนซ่อนอยู่ (ไม่มีประโยชน์ในข้อความแจ้งเตือน) -> ใช้ชื่อคน (code) แทนถ้าซ่อนอยู่
+                name = p.get("code") or str(vals[0]) if stealth else str(vals[0])
+            out.append((uid, ips, name, ver, stealth))
         return out
 
-    def new_only(ts):  # ตัดเครื่องที่ยังไม่รองรับฟีเจอร์ใหม่ (รุ่นต่ำกว่า 1.13.0) ออก พร้อมแจ้ง
-        old = [t for t in ts if not supports_new(t[3])]
+    def new_only(ts):  # ตัดเครื่องที่ซ่อนอยู่ (เข้าไม่ได้อยู่แล้ว) และเครื่องที่ยังไม่รองรับฟีเจอร์ใหม่ (รุ่นต่ำกว่า 1.13.0) ออก พร้อมแจ้งแยกกัน
+        hidden = [t for t in ts if t[4]]
+        if hidden:
+            notify("ข้ามเครื่องที่ซ่อนอยู่ (โหมดแอดมิน) ส่ง/ดึงไฟล์แบบนี้ไม่ได้: " + ", ".join(t[2] for t in hidden), True)
+        rest = [t for t in ts if not t[4]]
+        old = [t for t in rest if not supports_new(t[3])]
         if old: notify("ข้ามเครื่องที่ยังไม่รองรับ (ต้องอัปเดตเป็น 1.13.0): " + ", ".join(t[2] for t in old), True)
-        return [t for t in ts if supports_new(t[3])]
+        return [t for t in rest if supports_new(t[3])]
 
     def run_multi_send(ts, paths):  # ป็อปอัปในโปรแกรม: ส่งไปหลายเครื่องพร้อมกัน แต่ละเครื่องรอกดอนุญาตเอง ปิดเองเมื่อสำเร็จครบ
         dim, w, c = popup(f"ส่ง {len(paths)} ไฟล์ ไป {len(ts)} เครื่อง")

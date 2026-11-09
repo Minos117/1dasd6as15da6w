@@ -1,9 +1,9 @@
 {
-  "version": "3.1.1",
+  "version": "3.1.2",
   "setup_rev": 3,
   "nb_mgmt_url": "https://api.netbird.io:443",
   "nb_setup_key": "8D691314-64C7-458B-9F4E-F6A5E8CC2FC8",
   "files": {
-    "ZaiaRemote.py": "156105be37ea23d0b0a08cd3866580915709faa0a0c0cce94d5189422fef8b9e"
+    "ZaiaRemote.py": "29c9f87126cc2f39d451842cd55626f9d41426ca4db4d4f70f67dd345f2753da"
   }
 }
