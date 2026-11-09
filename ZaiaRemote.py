@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "3.1.2"
+APP_VER = "3.1.3"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -2319,11 +2319,11 @@ def main():
             out.append((uid, ips, name, ver, stealth))
         return out
 
-    def new_only(ts):  # ตัดเครื่องที่ซ่อนอยู่ (เข้าไม่ได้อยู่แล้ว) และเครื่องที่ยังไม่รองรับฟีเจอร์ใหม่ (รุ่นต่ำกว่า 1.13.0) ออก พร้อมแจ้งแยกกัน
-        hidden = [t for t in ts if t[4]]
-        if hidden:
-            notify("ข้ามเครื่องที่ซ่อนอยู่ (โหมดแอดมิน) ส่ง/ดึงไฟล์แบบนี้ไม่ได้: " + ", ".join(t[2] for t in hidden), True)
-        rest = [t for t in ts if not t[4]]
+    def new_only(ts):  # เครื่องซ่อนอยู่ (god mode): ติดต่อได้เฉพาะตอนเราก็เปิด god mode เหมือนกัน (คนละ god mode ขวางไว้เหมือนเดิม) + ตัดเครื่องที่ยังไม่รองรับฟีเจอร์ใหม่ (รุ่นต่ำกว่า 1.13.0) ออก พร้อมแจ้งแยกกัน
+        blocked = [t for t in ts if t[4] and not ADMIN[0]]
+        if blocked:
+            notify("ข้ามเครื่องที่ซ่อนอยู่ (โหมดแอดมิน) ต้องเปิด god mode ก่อนถึงจะส่ง/ดึงไฟล์ได้: " + ", ".join(t[2] for t in blocked), True)
+        rest = [t for t in ts if not (t[4] and not ADMIN[0])]
         old = [t for t in rest if not supports_new(t[3])]
         if old: notify("ข้ามเครื่องที่ยังไม่รองรับ (ต้องอัปเดตเป็น 1.13.0): " + ", ".join(t[2] for t in old), True)
         return [t for t in rest if supports_new(t[3])]
