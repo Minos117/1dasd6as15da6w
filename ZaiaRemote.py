@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import sys, os, json, socket, threading, time, io, ctypes, subprocess, winreg, re, ipaddress, uuid, urllib.request, zlib, queue, hashlib, struct, ntpath
+import sys, os, json, socket, threading, time, io, ctypes, subprocess, winreg, re, ipaddress, uuid, urllib.request, zlib, queue, hashlib, struct, ntpath, select
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, messagebox, simpledialog, filedialog
@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "3.1.3"
+APP_VER = "3.2.0"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -548,13 +548,26 @@ def fmt_size(n):
         if n < 1024 or u == "GB": return f"{n:.0f} B" if u == "B" else f"{n:.1f} {u}"
         n /= 1024
 
-def push_files(sock, paths, progress=None, stop=None):
+def push_files(sock, paths, progress=None, stop=None, dest=None):  # คืนจำนวนไฟล์ที่ปลายทางตอบว่าวางแล้ว (W); ปลายทางรุ่นเก่าไม่ตอบ = 0 (และวางที่เดสก์ท็อป)
     total = sum(os.path.getsize(x) for x in paths) or 1
-    done, last = 0, 0.0
+    done, last, acks = 0, 0.0, 0
+    def poll(wait):  # อ่านคำตอบจากปลายทาง: W = วางแล้ว, R = ปฏิเสธ (โฟลเดอร์ไม่อนุญาต)
+        nonlocal acks
+        r, _, _ = select.select([sock], [], [], wait)
+        while r:
+            lb = recv_exact(sock, 4)
+            if not lb: return
+            n = int.from_bytes(lb, "little"); d = recv_exact(sock, n & 0x1FFFFFFF)
+            if not d: return
+            if n & 0x80000000 and d[:1] == b"W": acks += 1
+            elif n & 0x80000000 and d[:1] == b"R": raise RuntimeError(d[1:].decode("utf-8", "replace"))
+            r, _, _ = select.select([sock], [], [], 0)
     for x in paths:
-        nb = os.path.basename(x).encode("utf-8")
+        base = os.path.basename(x)
+        nb = (ntpath.join(dest, base) if dest else base).encode("utf-8")
         size = os.path.getsize(x)
         sock.sendall(b"F" + len(nb).to_bytes(2, "little") + nb + size.to_bytes(8, "little"))
+        if dest: poll(0.15)  # ปลายทางปฏิเสธโฟลเดอร์จะตอบ R ทันที จะได้ไม่ส่งข้อมูลทิ้งเปล่า
         with open(x, "rb") as f:
             while True:
                 if stop is not None and stop.is_set(): raise RuntimeError("ยกเลิก")
@@ -564,6 +577,10 @@ def push_files(sock, paths, progress=None, stop=None):
                 done += len(b)
                 if progress and time.time() - last > 0.3:
                     last = time.time(); progress(int(done * 100 / total))
+    if dest:
+        end = time.time() + 3
+        while acks < len(paths) and time.time() < end: poll(0.3)
+    return acks
 
 def send_message(ips, text):  # ข้อความแจ้งเตือนสั้นๆ ไปเด้งบนเครื่องปลายทาง (ไม่ต้องกดอนุญาต แต่แสดงชื่อผู้ส่ง และกันรัว)
     tb = text.strip()[:300].encode("utf-8")
@@ -708,6 +725,13 @@ def peer_name(ip):
                 return f"{v.get('host','')} ({v.get('code','')})"
     return ""
 
+def peer_ver(ip):  # รุ่นโปรแกรมของเครื่องที่รู้จัก ("" = ไม่รู้จัก)
+    with peers_lock:
+        for v in peers.values():
+            if ip == v.get("ip") or ip in v.get("ips", ()):
+                return v.get("ver") or ""
+    return ""
+
 def peer_code(ip):  # ชื่อสั้น (ตำแหน่ง+หน่วย หรือชื่อที่ตั้งเอง) สำหรับป้ายแจ้งบนจอ ไม่เอาชื่อเครื่องเพราะอ่านไม่รู้เรื่อง
     with peers_lock:
         for v in peers.values():
@@ -820,14 +844,66 @@ def desktop_dir():
     ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buf)
     return buf.value or os.path.join(os.environ["USERPROFILE"], "Desktop")
 
-def unique_path(name):
-    name = os.path.basename(name) or "file"
+def unique_path(name, d=None):  # d = โฟลเดอร์ปลายทาง (ไม่ระบุ = เดสก์ท็อป เหมือนเดิม)
+    name = ntpath.basename(name) or "file"
     base, ext = os.path.splitext(name)
-    p, i = os.path.join(desktop_dir(), name), 1
+    dd = d or desktop_dir()
+    p, i = os.path.join(dd, name), 1
     while os.path.exists(p):
-        p = os.path.join(desktop_dir(), f"{base} ({i}){ext}")
+        p = os.path.join(dd, f"{base} ({i}){ext}")
         i += 1
     return p
+
+def dest_blocked(d):  # โฟลเดอร์ที่ห้ามวางไฟล์ลง: โฟลเดอร์ระบบ + Startup ของผู้ใช้ (กันฝังโปรแกรมให้เปิดเอง)
+    if blocked(d): return True
+    ap, appdata = os.path.abspath(d).lower(), os.environ.get("APPDATA")
+    if appdata:
+        st = os.path.abspath(os.path.join(appdata, "Microsoft", "Windows", "Start Menu", "Programs", "Startup")).lower()
+        if ap == st or ap.startswith(st + os.sep): return True
+    return False
+
+def dest_ok(d):
+    return os.path.isabs(d) and os.path.isdir(d) and not dest_blocked(d)
+
+DIR_LOCK = threading.Lock()  # เด้งหน้าต่างเลือกโฟลเดอร์ทีละเครื่อง (ส่งหลายเครื่องพร้อมกัน)
+
+def build_dir_chooser(parent, col, request, on_pick):  # วิดเจ็ตเลือกโฟลเดอร์ของเครื่องปลายทาง (แสดงเฉพาะโฟลเดอร์) คืนฟังก์ชัน fill(info) ไว้ให้ผู้เรียกป้อนรายการที่ปลายทางส่งมา
+    cur = {"path": "", "parent": None, "items": {}}
+    top = tk.Frame(parent, bg=col["bg"]); top.pack(fill="x", padx=20, pady=(4, 6))
+    lbl = tk.Label(top, text="กำลังโหลด ...", bg=col["bg"], fg=col["acc"], anchor="w", justify="left", font=FNT(12), wraplength=520)
+    ttk.Button(top, text="↑ ขึ้นไป", style=col["ghost"], command=lambda: request(cur["parent"] or "")).pack(side="left")
+    lbl.pack(side="left", padx=10, fill="x", expand=True)
+    mid = tk.Frame(parent, bg=col["bg"]); mid.pack(fill="both", expand=True, padx=20)
+    tv = ttk.Treeview(mid, show="tree", selectmode="browse", height=9)
+    sb = ttk.Scrollbar(mid, orient="vertical", command=tv.yview); tv.configure(yscrollcommand=sb.set)
+    sb.pack(side="right", fill="y"); tv.pack(side="left", fill="both", expand=True)
+    tk.Label(parent, text="ดับเบิลคลิกโฟลเดอร์เพื่อเปิด แล้วกด 'วางที่นี่' (วางลงโฟลเดอร์ที่เปิดอยู่)", bg=col["bg"], fg=col["sub"], font=FNT(10), anchor="w").pack(fill="x", padx=20, pady=(6, 0))
+    def fill(info):
+        try:
+            if info.get("error"):
+                lbl.config(text=info["error"], fg=col["bad"])
+                return
+            cur.update(path=info["path"], parent=info["parent"], items={})
+            lbl.config(text=info["path"] or "เครื่องนี้ (เลือกไดรฟ์หรือโฟลเดอร์ด้านล่าง)", fg=col["acc"])
+            tv.delete(*tv.get_children())
+            for i, it in enumerate(x for x in info["items"] if x["d"]):
+                cur["items"][str(i)] = it.get("p") or ntpath.join(info["path"], it["n"])
+                tv.insert("", "end", iid=str(i), text="▸ " + it["n"])
+        except tk.TclError:
+            pass  # หน้าต่างถูกปิดไปแล้ว
+    def open_sel(e=None):
+        sel = tv.selection()
+        if sel: request(cur["items"][sel[0]])
+    def here():
+        if not cur["path"]:
+            lbl.config(text="เปิดไดรฟ์หรือโฟลเดอร์ก่อน แล้วกด 'วางที่นี่'", fg=col["bad"])
+            return
+        on_pick(cur["path"])
+    tv.bind("<Double-1>", open_sel)
+    row = tk.Frame(parent, bg=col["bg"]); row.pack(fill="x", padx=20, pady=(10, 16))
+    ttk.Button(row, text="วางที่นี่", style=col["go"], command=here).pack(side="right")
+    ttk.Button(row, text="ยกเลิก", style=col["ghost"], command=lambda: on_pick(None)).pack(side="right", padx=10)
+    return fill
 
 def monitor_count():  # จำนวนจอจริงของเครื่องนี้ (ไม่รวม index 0 ที่ mss ใช้แทน "ทุกจอรวมกัน")
     try:
@@ -1140,6 +1216,10 @@ def handle_control_client(client, q=1, h264=False, mon_idx=1, who=""):
 def apply_input_loop(client, gone, lock, files_only=False):
     fh, rem, fp = None, 0, None
     cancel = threading.Event()
+    def reply(t, d):  # ตอบกลับฝั่งส่ง (W วางแล้ว / R ปฏิเสธ) รุ่นเก่าไม่รู้จัก ข้ามไปเฉยๆ
+        try:
+            with lock: client.sendall((len(t + d) | 0x80000000).to_bytes(4, "little") + t + d)
+        except Exception: pass
     try: peer = client.getpeername()[0]
     except Exception: peer = "?"
     try:
@@ -1171,16 +1251,22 @@ def apply_input_loop(client, gone, lock, files_only=False):
                 b = recv_exact(client, 4)
                 vk = int.from_bytes(b, "little", signed=True)
                 keybd_event(vk, True)
-            elif t == "F":  # เริ่มรับไฟล์: ชื่อ(2+n) ขนาด(8) -> เก็บบนเดสก์ท็อป
+            elif t == "F":  # เริ่มรับไฟล์: ชื่อ(2+n) ขนาด(8) ชื่อมีพาธโฟลเดอร์นำหน้าได้ (3.2.0+) ไม่มี/ใช้ไม่ได้ = เดสก์ท็อป (รุ่นเก่าตัดเหลือชื่อไฟล์ วางที่เดสก์ท็อปเสมอ)
                 n = int.from_bytes(recv_exact(client, 2), "little")
                 name = recv_exact(client, n).decode("utf-8", "replace")
                 rem = int.from_bytes(recv_exact(client, 8), "little")
-                if fh: fh.close()
-                fp = unique_path(name)
-                conn_log(f"{peer} | ส่งไฟล์เข้ามา: {name} ({rem} ไบต์)")
+                if fh: fh.close(); fh = None
+                dest = ntpath.dirname(name)
+                if dest and not dest_ok(dest):  # โฟลเดอร์ระบบ/Startup/ไม่มีอยู่ -> ไม่รับ ข้อมูล C ที่ตามมาจะถูกทิ้ง
+                    conn_log(f"{peer} | ปฏิเสธไฟล์เข้ามา (โฟลเดอร์ไม่อนุญาต): {name}")
+                    reply(b"R", "โฟลเดอร์ปลายทางไม่อนุญาตหรือไม่มีอยู่".encode("utf-8"))
+                    continue
+                fp = unique_path(name, dest or None)
+                conn_log(f"{peer} | ส่งไฟล์เข้ามา: {name} ({rem} ไบต์) -> {fp}")
                 fh = open(fp, "wb")
                 if rem == 0:
                     fh.close(); fh = None
+                    reply(b"W", fp.encode("utf-8"))
             elif t == "C":  # ข้อมูลไฟล์ทีละก้อน
                 n = int.from_bytes(recv_exact(client, 4), "little")
                 if n > (1 << 20): break
@@ -1189,6 +1275,7 @@ def apply_input_loop(client, gone, lock, files_only=False):
                     fh.write(d); rem -= n
                     if rem <= 0:
                         fh.close(); fh = None
+                        reply(b"W", fp.encode("utf-8"))
             elif t == "G":  # ขอดึงไฟล์จากเครื่องนี้
                 n = int.from_bytes(recv_exact(client, 2), "little")
                 path = recv_exact(client, n).decode("utf-8", "replace")
@@ -1305,8 +1392,9 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
     slock = threading.Lock()
     xf = {"w": None}
     cancel_up = threading.Event()
-    pull = {"q": [], "n": 0, "i": 0}
+    pull = {"q": [], "n": 0, "i": 0, "dir": None}
     br = {"fill": None}
+    acks = {"n": 0}
 
     def say(text, color="#3ddc84"):
         win.after(0, lambda: lbl_v.config(text=text, fg=color))
@@ -1350,14 +1438,17 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
         else:
             win.after(0, xfer_close)
             if pull["n"]:
-                say(f"ดึงไฟล์เสร็จ {pull['n']} ไฟล์ (อยู่บนเดสก์ท็อปเครื่องนี้)")
+                say(f"ดึงไฟล์เสร็จ {pull['n']} ไฟล์ ที่ {pull.get('dir') or 'เดสก์ท็อปเครื่องนี้'}")
                 pull["n"] = 0
 
     def start_pull(paths):  # ดึงทีละไฟล์ตามลำดับ (ฝั่งนี้ส่งคำขอถัดไปเมื่อไฟล์ก่อนหน้าเสร็จ)
         if rf["fh"] or pull["q"]:
             say("กำลังโอนไฟล์อยู่ รอให้เสร็จก่อน", "#ff6b6b")
             return
-        pull.update(q=list(paths), n=len(paths), i=0)
+        d = filedialog.askdirectory(parent=win, title="เลือกโฟลเดอร์ที่จะวางไฟล์ที่ดึงมา", initialdir=cfg.get("last_recv_dir") or desktop_dir())
+        if not d: return
+        cfg["last_recv_dir"] = d; save_config(cfg)
+        pull.update(q=list(paths), n=len(paths), i=0, dir=d)
         pull_next()
 
     def on_file_packet(p):
@@ -1366,7 +1457,7 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
             rf["size"] = int.from_bytes(d[:8], "little")
         elif t == b"N":
             if rf["fh"]: rf["fh"].close()
-            rf["path"] = unique_path(d.decode("utf-8", "replace"))
+            rf["path"] = unique_path(d.decode("utf-8", "replace"), pull.get("dir"))
             rf["fh"] = open(rf["path"], "wb")
             rf.update(got=0, t0=time.time(), last=0.0, name=os.path.basename(rf["path"]))
         elif t == b"D" and rf["fh"]:
@@ -1387,6 +1478,12 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
                 except OSError: pass
             say(d.decode("utf-8", "replace"), "#ff6b6b")
             pull_next()
+        elif t == b"W":  # ปลายทาง (3.2.0+) ยืนยันว่าวางไฟล์ที่ส่งไปแล้ว
+            acks["n"] += 1
+        elif t == b"R":  # ปลายทางไม่รับโฟลเดอร์ที่เลือก -> หยุดส่ง
+            cancel_up.set()
+            say(d.decode("utf-8", "replace"), "#ff6b6b")
+            win.after(0, xfer_close)
         elif t == b"L" and br["fill"]:
             try: info = json.loads(d.decode("utf-8"))
             except ValueError: return
@@ -1497,16 +1594,34 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
         except Exception as e:
             log_err(e)
 
-    def send_files(paths):
+    def ask_remote_dir(cb):  # เลือกโฟลเดอร์ปลายทางบนเครื่องที่ต่ออยู่ ทุกครั้งก่อนส่ง (วางทับในหน้าต่างนี้ ไม่เปิดหน้าต่างใหม่) cb(พาธ) หรือไม่เรียกถ้ายกเลิก
+        if files_only: win.geometry("760x520")
+        dim = tk.Frame(win, bg=tc("#2c3e5c")); dim.place(x=0, y=0, relwidth=1, relheight=1)
+        box = tk.Frame(dim, bg=tc("#101a2e"), highlightbackground=tc("#2fa8ff"), highlightthickness=3); box.place(relx=0.5, rely=0.5, anchor="center")
+        tk.Label(box, text="ส่งไฟล์ไปวางที่โฟลเดอร์ไหนของเครื่องปลายทาง", bg=tc("#101a2e"), fg=tc("#e7f0ff"), font=FNT(14, "bold")).pack(anchor="w", padx=20, pady=(16, 6))
+        saved = br["fill"]
+        def request(path):
+            pb = path.encode("utf-8"); send(b"L", len(pb).to_bytes(2, "little"), pb)
+        def done(path):
+            br["fill"] = saved
+            try: dim.destroy()
+            except tk.TclError: pass
+            if path is not None: cb(path)
+        col = dict(bg=tc("#101a2e"), acc=tc("#2fa8ff"), fg=tc("#e7f0ff"), sub=tc("#8fa3c4"), bad="#ff6b6b", go="Accent.TButton", ghost="Ghost.TButton")
+        br["fill"] = build_dir_chooser(box, col, request, done)  # ผลรายการจากปลายทางเข้าที่นี่ชั่วคราว (คืนให้หน้าต่างเรียกดูไฟล์เมื่อปิด)
+        dim.lift(); request("")
+
+    def send_files(paths, dest=None):
         paths = [x for x in paths if os.path.isfile(x)]
         if not paths: return
         cancel_up.clear()
+        acks["n"] = 0
         def run():
             for k, x in enumerate(paths, 1):
                 name, size = os.path.basename(x), os.path.getsize(x)
                 t0, last, done = time.time(), 0.0, 0
                 try:
-                    nb = name.encode("utf-8")
+                    nb = (ntpath.join(dest, name) if dest else name).encode("utf-8")
                     send(b"F", len(nb).to_bytes(2, "little"), nb, size.to_bytes(8, "little"))
                     with open(x, "rb") as f:
                         while alive[0] and not cancel_up.is_set():
@@ -1524,12 +1639,18 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
                     return
                 if cancel_up.is_set(): return
             win.after(0, xfer_close)
-            say(f"ส่งไฟล์แล้ว {len(paths)} ไฟล์ (อยู่บนเดสก์ท็อปเครื่องปลายทาง)")
+            where = "เดสก์ท็อปเครื่องปลายทาง"
+            if dest:  # รอคำยืนยัน W จากปลายทางรุ่นใหม่ (รุ่นเก่าไม่ตอบ = วางที่เดสก์ท็อป)
+                end = time.time() + 3
+                while acks["n"] < len(paths) and time.time() < end and alive[0] and not cancel_up.is_set(): time.sleep(0.1)
+                if cancel_up.is_set(): return
+                where = dest if acks["n"] >= len(paths) else "เดสก์ท็อปเครื่องปลายทาง (ปลายทางเป็นรุ่นเก่า ยังไม่รองรับการเลือกโฟลเดอร์)"
+            say(f"ส่งไฟล์แล้ว {len(paths)} ไฟล์ ไปที่ {where}")
         threading.Thread(target=run, daemon=True).start()
 
     def pick_send():
         ps = filedialog.askopenfilenames(parent=win)
-        if ps: send_files(list(ps))
+        if ps: ask_remote_dir(lambda d: send_files(list(ps), d))
 
     def open_browser():  # เรียกดูไฟล์ในเครื่องปลายทาง
         b = tk.Toplevel(win)
@@ -1637,7 +1758,7 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
     if DND[0]:
         try:
             canvas.drop_target_register(DND_FILES)
-            canvas.dnd_bind("<<Drop>>", lambda e: send_files(list(win.tk.splitlist(e.data))))
+            canvas.dnd_bind("<<Drop>>", lambda e: (lambda fl: ask_remote_dir(lambda d: send_files(fl, d)))(list(win.tk.splitlist(e.data))))
         except Exception as e:
             log_err(e)
     if not files_only: canvas.focus_set()
@@ -1867,6 +1988,8 @@ def main():
         dim.lift(); w.grab_set(); w.focus_set(); root.wait_window(dim)
 
     def probe_monitors(ip):  # ถามจำนวนจอของปลายทางแบบเงียบๆ (ไม่เข้าจอ ไม่ต้องขออนุญาต) ก่อนเปิดกล่องเลือกคุณภาพ
+        v = peer_ver(ip)
+        if not (v[:1].isdigit() and ver_tuple(v) >= (3, 1, 0)): return 1  # รุ่นเก่ากว่า 3.1.0 ไม่รู้จักคำสั่ง M จะเด้งกล่องขออนุญาตเอง / ไม่รู้รุ่น (ต่อด้วย IP) ก็ไม่ถาม
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(2)
@@ -1874,7 +1997,7 @@ def main():
             s.sendall(b"M")
             n = s.recv(1)
             s.close()
-            return max(1, n[0]) if n else 1
+            return max(1, min(n[0], 16)) if n else 1
         except Exception:
             return 1
 
@@ -2328,6 +2451,43 @@ def main():
         if old: notify("ข้ามเครื่องที่ยังไม่รองรับ (ต้องอัปเดตเป็น 1.13.0): " + ", ".join(t[2] for t in old), True)
         return [t for t in rest if supports_new(t[3])]
 
+    def pick_remote_dir_sync(sock, who):  # เรียกในเธรดเชื่อมต่อหลังปลายทางกดอนุญาต: เด้งป็อปอัปเลือกโฟลเดอร์ของเครื่อง who คืนพาธ (None = ยกเลิก/สายขาด)
+        res, ev, holder = [None], threading.Event(), {"ready": threading.Event()}
+        slk = threading.Lock()
+        def request(path):
+            pb = path.encode("utf-8")
+            try:
+                with slk: sock.sendall(b"L" + len(pb).to_bytes(2, "little") + pb)
+            except Exception as e: log_err(e)
+        def build():
+            dim, w, c = popup(f"เลือกโฟลเดอร์ปลายทางบน {who}")
+            col = dict(bg=c(PANEL), acc=c(ACCENT), fg=c(TEXT), sub=c(SUBTEXT), bad=c(DUP_C), go="Go.TButton", ghost="Ghost.TButton")
+            def done(p):
+                res[0] = p; ev.set()
+                if dim.winfo_exists(): dim.destroy()
+            holder["fill"] = build_dir_chooser(w, col, request, done); holder["dim"] = dim; holder["ready"].set()
+        with DIR_LOCK:
+            root.after(0, build)
+            if not holder["ready"].wait(5): return None
+            request("")
+            try:
+                while not ev.is_set():
+                    r, _, _ = select.select([sock], [], [], 0.2)
+                    if not r: continue
+                    lb = recv_exact(sock, 4)
+                    if not lb: break
+                    n = int.from_bytes(lb, "little"); data = recv_exact(sock, n & 0x1FFFFFFF)
+                    if not data: break
+                    if n & 0x80000000 and data[:1] == b"L":
+                        try: info = json.loads(data[1:].decode("utf-8"))
+                        except ValueError: continue
+                        root.after(0, lambda i=info: holder["fill"](i))
+            finally:
+                def kill():
+                    if holder["dim"].winfo_exists(): holder["dim"].destroy()
+                root.after(0, kill)
+        return res[0]
+
     def run_multi_send(ts, paths):  # ป็อปอัปในโปรแกรม: ส่งไปหลายเครื่องพร้อมกัน แต่ละเครื่องรอกดอนุญาตเอง ปิดเองเมื่อสำเร็จครบ
         dim, w, c = popup(f"ส่ง {len(paths)} ไฟล์ ไป {len(ts)} เครื่อง")
         box = tk.Label(w, bg=c(PANEL2), fg=c(TEXT), font=FNT(13), justify="left", anchor="nw", width=44, height=min(len(ts), 8) + 1)
@@ -2347,11 +2507,17 @@ def main():
         ttk.Button(w, text="ปิด / ยกเลิก", style="Ghost.TButton", command=close).pack(side="right", padx=S(24), pady=(S(4), S(20)))
         def worker(t):
             uid, ips = t[0], t[1]
+            got = {}
             def work(sock):
+                upd(uid, "เลือกโฟลเดอร์ปลายทาง ...")
+                dest = pick_remote_dir_sync(sock, t[2])
+                if dest is None: raise RuntimeError("ยกเลิกการเลือกโฟลเดอร์")
+                if stop.is_set(): raise RuntimeError("ยกเลิก")
                 upd(uid, "กำลังส่ง ...")
-                push_files(sock, paths, lambda pc: upd(uid, f"กำลังส่ง {pc}%"), stop)
+                got["dest"] = dest
+                got["acks"] = push_files(sock, paths, lambda pc: upd(uid, f"กำลังส่ง {pc}%"), stop, dest)
             ok, msg = files_session(ips, work)
-            upd(uid, "✓ ส่งเสร็จ (อยู่บนเดสก์ท็อปปลายทาง)" if ok else "✗ " + msg)
+            upd(uid, (f"✓ ส่งเสร็จ ที่ {got.get('dest')}" if got.get("acks", 0) >= len(paths) else "✓ ส่งเสร็จ (ปลายทางรุ่นเก่า วางที่เดสก์ท็อป)") if ok else "✗ " + msg)
         for t in ts: threading.Thread(target=worker, args=(t,), daemon=True).start()
         render()
 
@@ -2370,7 +2536,7 @@ def main():
         pb = ttk.Progressbar(w, maximum=100); pb.pack(fill="x", padx=S(24))
         row = tk.Frame(w, bg=c(PANEL)); row.pack(fill="x", padx=S(24), pady=S(12))
         st = {"sock": None, "lock": threading.Lock(), "alive": True, "parent": None, "items": {}, "fh": None, "path": "",
-              "size": 0, "got": 0, "t0": 0.0, "last": 0.0, "nm": "", "q": [], "n": 0, "i": 0}
+              "size": 0, "got": 0, "t0": 0.0, "last": 0.0, "nm": "", "q": [], "n": 0, "i": 0, "dir": None}
         def ui(fn):
             def f():
                 if dim.winfo_exists(): fn()
@@ -2390,7 +2556,7 @@ def main():
             else:
                 n = st["n"]; st["n"] = 0
                 ui(lambda: pb.config(value=0))
-                if n and ok: ui(lambda: lbl.config(text=f"ดึงเสร็จ {n} ไฟล์ (อยู่บนเดสก์ท็อปเครื่องนี้)", fg=c(OK_C)))
+                if n and ok: ui(lambda: lbl.config(text=f"ดึงเสร็จ {n} ไฟล์ ที่ {st.get('dir') or 'เดสก์ท็อปเครื่องนี้'}", fg=c(OK_C)))
         def fill(info):
             if info.get("error"):
                 lbl.config(text=info["error"], fg=c(DUP_C)); return
@@ -2406,7 +2572,7 @@ def main():
             if tt == b"S": st["size"] = int.from_bytes(d[:8], "little")
             elif tt == b"N":
                 if st["fh"]: st["fh"].close()
-                st["path"] = unique_path(d.decode("utf-8", "replace")); st["fh"] = open(st["path"], "wb")
+                st["path"] = unique_path(d.decode("utf-8", "replace"), st.get("dir")); st["fh"] = open(st["path"], "wb")
                 st.update(got=0, t0=time.time(), last=0.0, nm=os.path.basename(st["path"]))
             elif tt == b"D" and st["fh"]:
                 st["fh"].write(d); st["got"] += len(d)
@@ -2462,7 +2628,10 @@ def main():
                 lbl.config(text="เลือกไฟล์หรือโฟลเดอร์ก่อน (โฟลเดอร์จะถูกบีบเป็น zip / ดึงทั้งไดรฟ์ไม่ได้)", fg=c(DUP_C)); return
             if st["fh"] or st["q"]:
                 lbl.config(text="กำลังโอนไฟล์อยู่ รอให้เสร็จก่อน", fg=c(DUP_C)); return
-            st.update(q=list(files), n=len(files), i=0)
+            d = filedialog.askdirectory(parent=root, title="เลือกโฟลเดอร์ที่จะวางไฟล์ที่ดึงมา", initialdir=cfg.get("last_recv_dir") or desktop_dir())
+            if not d: return
+            cfg["last_recv_dir"] = d; save_config(cfg)
+            st.update(q=list(files), n=len(files), i=0, dir=d)
             pull_next()
         def open_sel(e=None):
             sel = tv.selection()
