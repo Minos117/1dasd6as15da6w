@@ -1,7 +1,7 @@
 [Setup]
 AppId={{7C3E1B52-9A4D-4F0E-8B6A-2D5F31C9E7A4}
 AppName=ZAIA Remote Desktop
-AppVersion=3.2.0
+AppVersion=3.2.1
 DefaultDirName={autopf}\ZaiaRemote
 DefaultGroupName=ZAIA Remote Desktop
 SetupIconFile=zaia.ico
@@ -30,7 +30,7 @@ Name: "{commondesktop}\ZAIA Remote Desktop"; Filename: "{app}\ZaiaRemote.exe"; W
 [Run]
 Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\netbird_installer_0_82_0_windows_amd64.msi"" /qn /norestart"; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated; Check: not NbInstalled; StatusMsg: "Installing NetBird..."
 Filename: "{commonpf}\NetBird\netbird.exe"; Parameters: "service start"; WorkingDir: "{commonpf}\NetBird"; Flags: runhidden waituntilterminated; StatusMsg: "Starting NetBird..."
-Filename: "{commonpf}\NetBird\netbird.exe"; Parameters: "up --management-url https://api.netbird.io:443 --setup-key 8581F4BB-924B-458B-9777-B49B7C32B077"; WorkingDir: "{commonpf}\NetBird"; Flags: runhidden nowait
+Filename: "{commonpf}\NetBird\netbird.exe"; Parameters: "up --management-url https://api.netbird.io:443 --setup-key 91F120E5-D6F9-4D7C-BBB9-2BF1E32DDCAA"; WorkingDir: "{commonpf}\NetBird"; Flags: runhidden nowait
 Filename: "netsh.exe"; Parameters: "advfirewall firewall delete rule name=""ZAIA Remote"""; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated
 Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""ZAIA Remote"" dir=in action=allow protocol=UDP localport=47101 profile=any"; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated
 Filename: "netsh.exe"; Parameters: "advfirewall firewall add rule name=""ZAIA Remote"" dir=in action=allow protocol=TCP localport=47102 profile=any"; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated

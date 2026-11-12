@@ -18,11 +18,11 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "3.2.0"
+APP_VER = "3.2.1"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
-DEFAULT_NB_KEY = "8D691314-64C7-458B-9F4E-F6A5E8CC2FC8"  # Setup Key ฝังไว้ให้เชื่อมต่ออัตโนมัติ (ถ้าเปลี่ยนใน update.json หรือหน้าตั้งค่า จะใช้ค่าใหม่แทน)
+DEFAULT_NB_KEY = "91F120E5-D6F9-4D7C-BBB9-2BF1E32DDCAA"  # Setup Key ฝังไว้ให้เชื่อมต่ออัตโนมัติ (ถ้าเปลี่ยนใน update.json หรือหน้าตั้งค่า จะใช้ค่าใหม่แทน)
 DEFAULT_PEER_IP = "100.123.145.188"  # IP NetBird ของเครื่องปลายทางหลัก ใส่ให้ในช่อง "ต่อด้วยเลข IP"
 PORT = 47101
 JPEG_Q = 75  # ใช้เฉพาะสำรองเมื่อไม่มี H.264; ค่าคงที่ ไม่ปรับเอง
