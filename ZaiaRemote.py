@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "3.2.1"
+APP_VER = "3.2.2"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -1141,7 +1141,7 @@ def handle_control_client(client, q=1, h264=False, mon_idx=1, who=""):
     watcher_add(who)
     try:
         client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 524288)  # BDP ของ NetBird สูง buffer ส่งเล็กเกินทำให้ความเร็วตก (ใหญ่เกินจะหน่วง)
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)  # เล็กไว้: ภาพที่ค้างในบัฟเฟอร์คือภาพเก่า (512KB ทำให้หน่วงเพิ่ม 2-3 เท่าบนลิงก์ช้า ความเร็วเท่าเดิม)
         grab = make_grabber(mon_idx)
         w, h = grab().size
         client.sendall(w.to_bytes(4, "little") + h.to_bytes(4, "little"))
@@ -1333,7 +1333,6 @@ def open_viewer(ips, q=1, auto=None, files_only=False, mon=1):  # auto: None ป
         notify(f"กำลังเชื่อมต่อ {ip} ...")
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)  # ต้องตั้งก่อน connect
         s.settimeout(5)
         try:
             s.connect((ip, CTRL_PORT))
@@ -1708,13 +1707,23 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
         br["fill"] = fill
         go("")
 
-    def on_move(e):
-        x, y = scaled(e)
-        send(b"M", x.to_bytes(4, "little", signed=True), y.to_bytes(4, "little", signed=True))
+    mv = {"p": None, "t": None}
+    def flush_move():  # ส่งตำแหน่งล่าสุดที่ค้างอยู่ (ถ้ามี)
+        if mv["t"] is not None:
+            try: win.after_cancel(mv["t"])
+            except Exception: pass
+            mv["t"] = None
+        p, mv["p"] = mv["p"], None
+        if p: send(b"M", p[0].to_bytes(4, "little", signed=True), p[1].to_bytes(4, "little", signed=True))
+    def on_move(e, now=False):
+        mv["p"] = scaled(e)  # เก็บแค่ตำแหน่งล่าสุด ไม่ส่งทุกการขยับ (เดิมส่งเป็นร้อยแพ็กเก็ตต่อวินาที เมาส์ค้างสะสมบนลิงก์ช้า)
+        if now: flush_move()
+        elif mv["t"] is None: mv["t"] = win.after(16, flush_move)
     def on_down(e, btn):
-        on_move(e)
+        on_move(e, True)
         send(b"D", bytes([btn]))
     def on_up(e, btn):
+        flush_move()  # ปล่อยปุ่มที่ตำแหน่งสุดท้ายที่ลากถึง
         send(b"U", bytes([btn]))
     def on_wheel(e):
         send(b"W", int(e.delta).to_bytes(4, "little", signed=True))
