@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "3.2.2"
+APP_VER = "3.2.3"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -1134,6 +1134,37 @@ def stream_rects(client, grab, gone, lock, fps):  # โหมดเอกสา�
         if nxt > now: time.sleep(nxt - now)
         elif now - nxt > iv: nxt = now
 
+def secure_desktop_active():  # True = หน้าจอปลายทางอยู่บน Secure Desktop (UAC/ล็อกจอ) ซึ่งโปรแกรมนี้จับภาพไม่ได้ (จอดำ)
+    try:
+        u = ctypes.windll.user32
+        u.OpenInputDesktop.restype = ctypes.c_void_p
+        h = u.OpenInputDesktop(0, False, 0x0001)
+        if not h: return True  # เปิดเดสก์ท็อปที่รับอินพุตอยู่ไม่ได้ = ไม่ใช่เดสก์ท็อปของผู้ใช้
+        try:
+            buf = ctypes.create_unicode_buffer(256)
+            n = ctypes.c_ulong(0)
+            if u.GetUserObjectInformationW(ctypes.c_void_p(h), 2, buf, 512, ctypes.byref(n)):
+                return buf.value.lower() != "default"
+            return False
+        finally:
+            u.CloseDesktop(ctypes.c_void_p(h))
+    except Exception:
+        return False
+
+def uac_notifier(client, gone, lock):  # แจ้งฝั่งผู้คุม (แพ็กเก็ต B) เมื่อปลายทางเข้า/ออกจากหน้าต่าง UAC รุ่นเก่าข้ามแพ็กเก็ตนี้เอง
+    cur, cnt = False, 0
+    while not gone.wait(0.4):
+        now = secure_desktop_active()
+        if now == cur: cnt = 0; continue
+        cnt += 1
+        if cnt < 2: continue  # ต้องเห็นซ้ำ 2 รอบกันกะพริบ
+        cur, cnt = now, 0
+        try:
+            with lock:
+                client.sendall((2 | 0x80000000).to_bytes(4, "little") + b"B" + (b"1" if cur else b"0"))
+        except Exception:
+            return
+
 def handle_control_client(client, q=1, h264=False, mon_idx=1, who=""):
     maxw, fps, _ = QUALITY[q]
     if maxw == 0: maxw = 1 << 16
@@ -1147,6 +1178,7 @@ def handle_control_client(client, q=1, h264=False, mon_idx=1, who=""):
         client.sendall(w.to_bytes(4, "little") + h.to_bytes(4, "little"))
         gone = threading.Event()
         threading.Thread(target=apply_input_loop, args=(client, gone, lock), daemon=True).start()
+        threading.Thread(target=uac_notifier, args=(client, gone, lock), daemon=True).start()
         if q == 3:  # โหมดเอกสาร
             stream_rects(client, grab, gone, lock, fps)
             return
@@ -1483,6 +1515,17 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
             cancel_up.set()
             say(d.decode("utf-8", "replace"), "#ff6b6b")
             win.after(0, xfer_close)
+        elif t == b"B":  # ปลายทางกำลังแสดงหน้าต่าง UAC/ล็อกจอ (จับภาพไม่ได้) -> ขึ้นข้อความแทนภาพดำ
+            on = d[:1] == b"1"
+            def _uac():
+                if on:
+                    if g.get("uac") is None:
+                        g["uac"] = tk.Label(canvas, text="ปลายทางกำลังแสดงหน้าต่างขออนุญาต (UAC)\nให้คนหน้าเครื่องกดอนุญาต แล้วภาพจะกลับมาเอง",
+                                            bg="#10192b", fg="#ffd166", font=("Segoe UI", 16, "bold"), padx=24, pady=16, justify="center")
+                    g["uac"].place(relx=0.5, rely=0.5, anchor="center"); g["uac"].lift()
+                elif g.get("uac") is not None:
+                    g["uac"].place_forget()
+            win.after(0, _uac)
         elif t == b"L" and br["fill"]:
             try: info = json.loads(d.decode("utf-8"))
             except ValueError: return
