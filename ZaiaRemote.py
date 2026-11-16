@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "4.0.0"
+APP_VER = "4.0.1"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -1439,6 +1439,12 @@ class SysLink:  # ฝั่งโปรแกรมหลัก: คุยกั
             return True
         except Exception:
             return False
+    def route(s):  # ส่วน SYSTEM พร้อมไหม -> ส่งอินพุตผ่านส่วน SYSTEM ตลอด (UAC บนจอปกติก็กดได้) ไม่พร้อมก็ใช้ทางเดิม
+        try:
+            with s.lk["i"]: s._get("i")
+            return True
+        except Exception:
+            return False
     def active(s):  # ปลายทางอยู่บน Secure Desktop ตอนนี้ไหม (แคช 0.1 วินาที)
         n = time.time()
         if n - s.t > 0.1: s.v, s.t = secure_desktop_active(), n
@@ -1603,30 +1609,30 @@ def apply_input_loop(client, gone, lock, files_only=False, sysl=None):
                 b = recv_exact(client, 8)
                 x = int.from_bytes(b[0:4], "little", signed=True)
                 y = int.from_bytes(b[4:8], "little", signed=True)
-                if sysl is not None and sysl.active(): sysl.inp(b"M" + b)  # Secure Desktop: ส่งให้ส่วน SYSTEM
+                if sysl is not None and sysl.route(): sysl.inp(b"M" + b)  # Secure Desktop: ส่งให้ส่วน SYSTEM
                 else: set_cursor(x, y)
             elif t == "D":
                 b = recv_exact(client, 1)[0]
-                if sysl is not None and sysl.active(): sysl.inp(b"D" + bytes([b]))
+                if sysl is not None and sysl.route(): sysl.inp(b"D" + bytes([b]))
                 else: mouse_event(MOUSE_FLAGS_DOWN.get(b, 0x0002))
             elif t == "U":
                 b = recv_exact(client, 1)[0]
-                if sysl is not None and sysl.active(): sysl.inp(b"U" + bytes([b]))
+                if sysl is not None and sysl.route(): sysl.inp(b"U" + bytes([b]))
                 else: mouse_event(MOUSE_FLAGS_UP.get(b, 0x0004))
             elif t == "W":
                 b = recv_exact(client, 4)
                 delta = int.from_bytes(b, "little", signed=True)
-                if sysl is not None and sysl.active(): sysl.inp(b"W" + b)
+                if sysl is not None and sysl.route(): sysl.inp(b"W" + b)
                 else: mouse_event(0x0800, ctypes.c_uint32(delta).value)
             elif t == "K":
                 b = recv_exact(client, 4)
                 vk = int.from_bytes(b, "little", signed=True)
-                if sysl is not None and sysl.active(): sysl.inp(b"K" + b)
+                if sysl is not None and sysl.route(): sysl.inp(b"K" + b)
                 else: keybd_event(vk, False)
             elif t == "J":
                 b = recv_exact(client, 4)
                 vk = int.from_bytes(b, "little", signed=True)
-                if sysl is not None and sysl.active(): sysl.inp(b"J" + b)
+                if sysl is not None and sysl.route(): sysl.inp(b"J" + b)
                 else: keybd_event(vk, True)
             elif t == "F":  # เริ่มรับไฟล์: ชื่อ(2+n) ขนาด(8) ชื่อมีพาธโฟลเดอร์นำหน้าได้ (3.2.0+) ไม่มี/ใช้ไม่ได้ = เดสก์ท็อป (รุ่นเก่าตัดเหลือชื่อไฟล์ วางที่เดสก์ท็อปเสมอ)
                 n = int.from_bytes(recv_exact(client, 2), "little")
