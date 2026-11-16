@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "3.2.3"
+APP_VER = "3.3.0"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -208,6 +208,18 @@ except Exception: pass
 def is_admin():
     try: return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception: return False
+
+UAC_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+def uac_secure_on():  # True = UAC ขึ้นบน Secure Desktop (ค่าปกติของ Windows) ผู้คุมจะเห็นเป็นจอดำ
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, UAC_KEY, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as k:
+            return winreg.QueryValueEx(k, "PromptOnSecureDesktop")[0] != 0
+    except OSError:
+        return True
+
+def set_uac_secure(on):  # ต้องเป็น admin ถ้าไม่ใช่จะ raise PermissionError
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, UAC_KEY, 0, winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY) as k:
+        winreg.SetValueEx(k, "PromptOnSecureDesktop", 0, winreg.REG_DWORD, 1 if on else 0)
 
 def task_exists():
     try:
@@ -2176,6 +2188,25 @@ def main():
         else:
             commit(False)
     tk.Checkbutton(sec_srv, text="อนุญาตเชื่อมต่ออัตโนมัติ (ไม่มีคนนั่งหน้าเครื่อง)", variable=auto_var, command=toggle_auto,
+                   bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT, font=FNT(13),
+                   anchor="w", justify="left", wraplength=S(520)).pack(fill="x", padx=16, pady=(0, 6))
+    uac_var = tk.BooleanVar(value=not uac_secure_on())
+    def toggle_uac():
+        want_off = uac_var.get()  # True = ให้ UAC ขึ้นบนจอปกติ
+        def commit(off):
+            try:
+                set_uac_secure(not off)
+                notify("UAC ขึ้นบนจอปกติแล้ว ผู้คุมเห็นและลองกดได้" if off else "คืนค่า UAC เป็นแบบ Secure Desktop (ค่าเดิมของ Windows) แล้ว")
+            except Exception as e:
+                log_err(e)
+                uac_var.set(not off)
+                notify("แก้ไม่ได้: ต้องเปิดโปรแกรมแบบ admin (" + str(e)[:60] + ")", True)
+        if want_off:
+            ask_yes("UAC บนจอปกติ", "หน้าต่างขออนุญาต (UAC) จะขึ้นบนจอปกติ ผู้คุมเห็นภาพและลองกดได้ แต่ความปลอดภัยของเครื่องนี้ลดลง (โปรแกรมอื่นอาจเห็น/ควบคุมหน้าต่าง UAC ได้ง่ายขึ้น) และอาจกดจากเครื่องผู้คุมไม่ได้ในบางเครื่อง ยืนยันหรือไม่?",
+                    lambda: commit(True), lambda: uac_var.set(False))
+        else:
+            commit(False)
+    tk.Checkbutton(sec_srv, text="ให้ UAC ขึ้นบนจอปกติ (ผู้คุมเห็น/ลองกดอนุญาตได้ ลดความปลอดภัยเครื่องนี้)", variable=uac_var, command=toggle_uac,
                    bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT, font=FNT(13),
                    anchor="w", justify="left", wraplength=S(520)).pack(fill="x", padx=16, pady=(0, 14))
     sbind(left)
