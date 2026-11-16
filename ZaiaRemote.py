@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "3.3.0"
+APP_VER = "4.0.0"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -246,6 +246,202 @@ def ask_show():  # สั่งตัวที่รันอยู่ให้�
     except Exception:
         pass
 
+# ---------- ส่วน SYSTEM (4.0.0) ----------
+# งาน Scheduled Task "ZAIA Remote SYSTEM" (SYSTEM) รัน --sysagent -> เปิดตัวทำงาน --sysworker (SYSTEM) ในเซสชันผู้ใช้
+# ตัวทำงานผูกกับ Desktop ที่รับอินพุตอยู่ (รวม Secure Desktop ของ UAC/ล็อกจอ) แล้วจับภาพ/ส่งเมาส์คีย์บอร์ดให้โปรแกรมหลักผ่าน 127.0.0.1 (ต้องมี token ในไฟล์ที่เฉพาะ admin/SYSTEM อ่านได้)
+SYS_DIR = os.path.join(os.environ.get("ProgramData", r"C:\ProgramData"), "ZaiaRemote")
+SYS_FILE = os.path.join(SYS_DIR, "sysagent.json")
+SYS_TASK = "ZAIA Remote SYSTEM"
+_SYS_DOWN = {0: 0x0002, 1: 0x0008, 2: 0x0020}
+_SYS_UP = {0: 0x0004, 1: 0x0010, 2: 0x0040}
+
+def _sys_attach(st):  # ผูกเธรดกับ Desktop ที่รับอินพุตอยู่ ต้องทำก่อนจับภาพ/ส่งอินพุต
+    u = ctypes.windll.user32
+    u.OpenInputDesktop.restype = ctypes.c_void_p
+    u.OpenInputDesktop.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    u.SetThreadDesktop.argtypes = [ctypes.c_void_p]
+    u.CloseDesktop.argtypes = [ctypes.c_void_p]
+    h = u.OpenInputDesktop(0, False, 0x10000000)
+    if not h: return False
+    if u.SetThreadDesktop(h):
+        if st.get("h"): u.CloseDesktop(st["h"])
+        st["h"] = h
+        return True
+    u.CloseDesktop(h)
+    return False
+
+def _sys_grab(l, t, w, h):  # จับภาพจากจอด้วย GDI ของ Desktop ที่เธรดนี้ผูกอยู่
+    u, g = ctypes.windll.user32, ctypes.windll.gdi32
+    V, I, U = ctypes.c_void_p, ctypes.c_int, ctypes.c_uint
+    u.GetDC.restype = V; u.GetDC.argtypes = [V]; u.ReleaseDC.argtypes = [V, V]
+    g.CreateCompatibleDC.restype = V; g.CreateCompatibleDC.argtypes = [V]
+    g.CreateCompatibleBitmap.restype = V; g.CreateCompatibleBitmap.argtypes = [V, I, I]
+    g.SelectObject.restype = V; g.SelectObject.argtypes = [V, V]
+    g.BitBlt.argtypes = [V, I, I, I, I, V, I, I, ctypes.c_uint32]
+    g.GetDIBits.argtypes = [V, V, U, U, V, V, U]
+    g.DeleteObject.argtypes = [V]; g.DeleteDC.argtypes = [V]
+    sdc = u.GetDC(None)
+    if not sdc: raise OSError("GetDC")
+    mdc = bmp = None
+    try:
+        mdc = g.CreateCompatibleDC(sdc)
+        bmp = g.CreateCompatibleBitmap(sdc, w, h)
+        old = g.SelectObject(mdc, bmp)
+        ok = g.BitBlt(mdc, 0, 0, w, h, sdc, l, t, 0x00CC0020 | 0x40000000)  # SRCCOPY | CAPTUREBLT
+        g.SelectObject(mdc, old)
+        if not ok: raise OSError("BitBlt")
+        buf = ctypes.create_string_buffer(w * h * 4)
+        bmi = ctypes.create_string_buffer(struct.pack("<IiiHHIIiiII", 40, w, -h, 1, 32, 0, 0, 0, 0, 0, 0))
+        if not g.GetDIBits(mdc, bmp, 0, h, buf, bmi, 0): raise OSError("GetDIBits")
+        return Image.frombuffer("RGB", (w, h), bytes(buf), "raw", "BGRX", 0, 1)
+    finally:
+        if bmp: g.DeleteObject(bmp)
+        if mdc: g.DeleteDC(mdc)
+        u.ReleaseDC(None, sdc)
+
+def _sys_rx(c, n):
+    buf = b""
+    while len(buf) < n:
+        d = c.recv(n - len(buf))
+        if not d: return None
+        buf += d
+    return buf
+
+def _sys_conn(c, token):
+    st, u = {}, ctypes.windll.user32
+    try:
+        c.settimeout(5)
+        if _sys_rx(c, 32) != token.encode("latin1"): return
+        c.settimeout(None)
+        v = APP_VER.encode()
+        c.sendall(bytes([len(v)]) + v)
+        last = 0.0
+        while True:
+            t = _sys_rx(c, 1)
+            if not t: break
+            t = t.decode("latin1")
+            if t == "G":
+                l, tp, w, h = struct.unpack("<iiii", _sys_rx(c, 16))
+                if w < 1 or h < 1 or w > 16384 or h > 16384: break
+                _sys_attach(st)
+                buf = io.BytesIO()
+                _sys_grab(l, tp, w, h).save(buf, "JPEG", quality=85)
+                d = buf.getvalue()
+                c.sendall(len(d).to_bytes(4, "little") + d)
+            elif t in "MDUWKJ":
+                b = _sys_rx(c, {"M": 8, "D": 1, "U": 1, "W": 4, "K": 4, "J": 4}[t])
+                if b is None: break
+                now = time.time()
+                if t != "M" or now - last > 0.2:  # ขยับเมาส์ถี่ ๆ ไม่ต้องผูก Desktop ซ้ำทุกครั้ง
+                    _sys_attach(st); last = now
+                if t == "M":
+                    u.SetCursorPos(int.from_bytes(b[:4], "little", signed=True), int.from_bytes(b[4:], "little", signed=True))
+                elif t == "D": u.mouse_event(_SYS_DOWN.get(b[0], 0x0002), 0, 0, 0, 0)
+                elif t == "U": u.mouse_event(_SYS_UP.get(b[0], 0x0004), 0, 0, 0, 0)
+                elif t == "W": u.mouse_event(0x0800, 0, 0, ctypes.c_uint32(int.from_bytes(b, "little", signed=True)).value, 0)
+                else: u.keybd_event(int.from_bytes(b, "little", signed=True), 0, 2 if t == "J" else 0, 0)
+            else:
+                break
+    except Exception as e:
+        log_err(e)
+    finally:
+        try: c.close()
+        except Exception: pass
+
+def _sys_worker():
+    import secrets
+    os.makedirs(SYS_DIR, exist_ok=True)
+    subprocess.run(["icacls", SYS_DIR, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F"],
+                   capture_output=True, creationflags=0x08000000, timeout=30)  # เฉพาะ SYSTEM กับ Administrators
+    token = secrets.token_hex(16)
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    tmp = SYS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"port": srv.getsockname()[1], "token": token, "ver": APP_VER, "pid": os.getpid()}, f)
+    os.replace(tmp, SYS_FILE)
+    while True:
+        c, _ = srv.accept()
+        threading.Thread(target=_sys_conn, args=(c, token), daemon=True).start()
+
+class _SI(ctypes.Structure):
+    _fields_ = [("cb", ctypes.c_uint32), ("lpReserved", ctypes.c_wchar_p), ("lpDesktop", ctypes.c_wchar_p), ("lpTitle", ctypes.c_wchar_p),
+                ("dwX", ctypes.c_uint32), ("dwY", ctypes.c_uint32), ("dwXSize", ctypes.c_uint32), ("dwYSize", ctypes.c_uint32),
+                ("dwXCountChars", ctypes.c_uint32), ("dwYCountChars", ctypes.c_uint32), ("dwFillAttribute", ctypes.c_uint32),
+                ("dwFlags", ctypes.c_uint32), ("wShowWindow", ctypes.c_uint16), ("cbReserved2", ctypes.c_uint16),
+                ("lpReserved2", ctypes.c_void_p), ("hStdInput", ctypes.c_void_p), ("hStdOutput", ctypes.c_void_p), ("hStdError", ctypes.c_void_p)]
+class _PI(ctypes.Structure):
+    _fields_ = [("hProcess", ctypes.c_void_p), ("hThread", ctypes.c_void_p), ("dwProcessId", ctypes.c_uint32), ("dwThreadId", ctypes.c_uint32)]
+
+def _sys_spawn(sid, cmd):  # เปิดโปรเซส SYSTEM ในเซสชัน sid (ทำสำเนา token ของตัวเองแล้วเปลี่ยนเซสชัน) คืน handle โปรเซส
+    k, a = ctypes.windll.kernel32, ctypes.windll.advapi32
+    V = ctypes.c_void_p
+    k.GetCurrentProcess.restype = V
+    a.OpenProcessToken.argtypes = [V, ctypes.c_uint32, ctypes.POINTER(V)]
+    a.DuplicateTokenEx.argtypes = [V, ctypes.c_uint32, V, ctypes.c_int, ctypes.c_int, ctypes.POINTER(V)]
+    a.SetTokenInformation.argtypes = [V, ctypes.c_int, V, ctypes.c_uint32]
+    a.AdjustTokenPrivileges.argtypes = [V, ctypes.c_int, V, ctypes.c_uint32, V, V]
+    a.LookupPrivilegeValueW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, V]
+    a.CreateProcessAsUserW.argtypes = [V, ctypes.c_wchar_p, ctypes.c_wchar_p, V, V, ctypes.c_int, ctypes.c_uint32, V, ctypes.c_wchar_p,
+                                       ctypes.POINTER(_SI), ctypes.POINTER(_PI)]
+    tok, new = V(), V()
+    if not a.OpenProcessToken(k.GetCurrentProcess(), 0x2 | 0x8 | 0x20, ctypes.byref(tok)):  # DUPLICATE|QUERY|ADJUST_PRIVILEGES
+        raise OSError("OpenProcessToken %d" % ctypes.GetLastError())
+    try:
+        luid = ctypes.c_uint64()
+        if a.LookupPrivilegeValueW(None, "SeTcbPrivilege", ctypes.byref(luid)):  # เปิดสิทธิ์เปลี่ยนเซสชันของ token (ปกติ SYSTEM มีอยู่แล้ว)
+            tp = ctypes.create_string_buffer(struct.pack("<IQI", 1, luid.value, 2))
+            a.AdjustTokenPrivileges(tok, 0, tp, 0, None, None)
+        if not a.DuplicateTokenEx(tok, 0x02000000, None, 2, 1, ctypes.byref(new)):
+            raise OSError("DuplicateTokenEx %d" % ctypes.GetLastError())
+        try:
+            s = ctypes.c_uint32(sid)
+            if not a.SetTokenInformation(new, 12, ctypes.byref(s), 4):  # TokenSessionId
+                raise OSError("SetTokenInformation %d" % ctypes.GetLastError())
+            si = _SI(); si.cb = ctypes.sizeof(_SI); si.lpDesktop = "winsta0\\default"
+            pi = _PI()
+            if not a.CreateProcessAsUserW(new, None, ctypes.create_unicode_buffer(cmd), None, None, False, 0x08000000, None, None,
+                                          ctypes.byref(si), ctypes.byref(pi)):
+                raise OSError("CreateProcessAsUser %d" % ctypes.GetLastError())
+            k.CloseHandle(ctypes.c_void_p(pi.hThread))
+            return pi.hProcess
+        finally:
+            k.CloseHandle(new)
+    finally:
+        k.CloseHandle(tok)
+
+def _sys_launcher():
+    k = ctypes.windll.kernel32
+    k.WTSGetActiveConsoleSessionId.restype = ctypes.c_uint32
+    k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    k.WaitForSingleObject.restype = ctypes.c_uint32
+    k.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    k.CloseHandle.argtypes = [ctypes.c_void_p]
+    cmd = f'"{sys.executable}" "{os.path.abspath(__file__)}" --sysworker'
+    while True:
+        try:
+            sid = k.WTSGetActiveConsoleSessionId()
+            if sid in (0, 0xFFFFFFFF):
+                time.sleep(3); continue
+            hp = _sys_spawn(sid, cmd)
+            while True:
+                if k.WaitForSingleObject(hp, 2000) == 0: break  # ตัวทำงานจบเอง
+                if k.WTSGetActiveConsoleSessionId() != sid:  # สลับผู้ใช้/ล็อกออก -> เปิดใหม่ในเซสชันใหม่
+                    k.TerminateProcess(hp, 0); break
+            k.CloseHandle(hp)
+        except Exception as e:
+            log_err(e)
+        time.sleep(2)
+
+if "--sysagent" in sys.argv or "--sysworker" in sys.argv:  # โหมดส่วน SYSTEM: ไม่เปิด UI ไม่แย่ง mutex ของโปรแกรมหลัก
+    try:
+        if "--sysworker" in sys.argv: _sys_worker()
+        else: _sys_launcher()
+    except Exception as e:
+        log_err(e)
+    os._exit(0)
+
 if "--silent" not in sys.argv and "--noelev" not in sys.argv:
     if already_running():
         ask_show()
@@ -433,6 +629,47 @@ def ensure_startup_task():  # ทุกเครื่องได้งาน�
         cfg["task_mark"] = mark
         save_config(cfg)
         set_autostart()  # มีงานแล้ว ลบ Run key ซ้ำออก
+    except Exception as e:
+        log_err(e)
+
+def _pyw():
+    pw = os.path.join(SCRIPT_DIR, "python", "pythonw.exe")
+    return pw if os.path.exists(pw) else sys.executable.replace("python.exe", "pythonw.exe")
+
+def sys_task_set(on):  # เปิด/ปิดส่วน SYSTEM คืนข้อความผิดพลาด (ว่าง = สำเร็จ) ต้องเป็น admin
+    nw = 0x08000000
+    def run(a, t=60): return subprocess.run(a, capture_output=True, text=True, creationflags=nw, timeout=t)
+    try:
+        if not on:
+            run(["schtasks", "/End", "/TN", SYS_TASK]); run(["schtasks", "/Delete", "/TN", SYS_TASK, "/F"])
+            try: os.remove(SYS_FILE)
+            except OSError: pass
+            return ""
+        tr = f'"{_pyw()}" "{os.path.abspath(__file__)}" --sysagent'
+        r = run(["schtasks", "/Create", "/TN", SYS_TASK, "/TR", tr, "/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/F"])
+        if r.returncode != 0: return (r.stdout + r.stderr).strip()[:200]
+        r = run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                 "Set-ScheduledTask -TaskName '" + SYS_TASK + "' -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Seconds 0))"])
+        if r.returncode != 0: return (r.stdout + r.stderr).strip()[:200]
+        run(["schtasks", "/End", "/TN", SYS_TASK])  # รีสตาร์ตให้ใช้โค้ดรุ่นปัจจุบัน
+        r = run(["schtasks", "/Run", "/TN", SYS_TASK])
+        return "" if r.returncode == 0 else (r.stdout + r.stderr).strip()[:200]
+    except Exception as e:
+        return str(e)[:200]
+
+def sys_ensure():  # ตอนเปิดโปรแกรม: ถ้าเปิดส่วน SYSTEM ไว้ ตรวจว่ารุ่นตรงกัน (หลังอัปเดต/ย้อนรุ่น) ไม่ตรงหรือไม่ขึ้นก็สร้าง/รีสตาร์ตใหม่
+    if not cfg.get("sys_on") or not is_admin(): return
+    try:
+        for _ in range(20):
+            time.sleep(3)
+            try:
+                SysLink()._open().close(); return
+            except RuntimeError:
+                break  # คนละรุ่น
+            except Exception:
+                continue
+        err = sys_task_set(True)
+        if err: log_err("ส่วน SYSTEM เริ่มไม่ได้: " + err)
     except Exception as e:
         log_err(e)
 
@@ -943,6 +1180,7 @@ def make_grabber(mon_idx=1):
             size, b = raw()
             return Image.frombytes("RGB", size, b, "raw", "BGRX")
         g.raw = raw
+        g.rect = (mon["left"], mon["top"], mon["width"], mon["height"])
         return g
     except Exception as e:
         log_err(e)
@@ -1163,10 +1401,96 @@ def secure_desktop_active():  # True = หน้าจอปลายทาง�
     except Exception:
         return False
 
-def uac_notifier(client, gone, lock):  # แจ้งฝั่งผู้คุม (แพ็กเก็ต B) เมื่อปลายทางเข้า/ออกจากหน้าต่าง UAC รุ่นเก่าข้ามแพ็กเก็ตนี้เอง
+class SysLink:  # ฝั่งโปรแกรมหลัก: คุยกับส่วน SYSTEM (ใช้เฉพาะตอนปลายทางอยู่บน Secure Desktop)
+    def __init__(s):
+        s.sock, s.lk, s.fail, s.t, s.v = {"g": None, "i": None}, {"g": threading.Lock(), "i": threading.Lock()}, 0.0, 0.0, False
+    def _open(s):
+        with open(SYS_FILE, encoding="utf-8") as f: d = json.load(f)
+        c = socket.create_connection(("127.0.0.1", int(d["port"])), timeout=3)
+        try:
+            c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            c.sendall(str(d["token"]).encode("latin1"))
+            n = recv_exact(c, 1)
+            ver = recv_exact(c, n[0]).decode() if n else ""
+            if ver != APP_VER: raise RuntimeError("ส่วน SYSTEM คนละรุ่น: " + ver)
+            c.settimeout(5)
+            return c
+        except Exception:
+            c.close(); raise
+    def _get(s, k):
+        if s.sock[k] is None:
+            if time.time() - s.fail < 3: raise ConnectionError("ส่วน SYSTEM ยังไม่พร้อม")
+            try: s.sock[k] = s._open()
+            except Exception:
+                s.fail = time.time(); raise
+        return s.sock[k]
+    def _drop(s, k):
+        try: s.sock[k].close()
+        except Exception: pass
+        s.sock[k], s.fail = None, time.time()
+    def close(s):
+        for k in ("g", "i"):
+            try: s.sock[k].close()
+            except Exception: pass
+            s.sock[k] = None
+    def usable(s):
+        try:
+            with s.lk["g"]: s._get("g")
+            return True
+        except Exception:
+            return False
+    def active(s):  # ปลายทางอยู่บน Secure Desktop ตอนนี้ไหม (แคช 0.1 วินาที)
+        n = time.time()
+        if n - s.t > 0.1: s.v, s.t = secure_desktop_active(), n
+        return s.v
+    def grab(s, rect):
+        with s.lk["g"]:
+            try:
+                c = s._get("g")
+                c.sendall(b"G" + struct.pack("<iiii", *rect))
+                h = recv_exact(c, 4)
+                d = recv_exact(c, int.from_bytes(h, "little")) if h else None
+                if not d: raise ConnectionError("ส่วน SYSTEM ไม่ตอบ")
+                im = Image.open(io.BytesIO(d)); im.load()
+                return im.convert("RGB")
+            except Exception:
+                s._drop("g"); raise
+    def inp(s, data):
+        with s.lk["i"]:
+            try: s._get("i").sendall(data)
+            except Exception: s._drop("i")
+
+def sys_wrap(grab, sl):  # ตอนอยู่บน Secure Desktop ใช้ภาพจากส่วน SYSTEM นอกนั้นใช้ตัวจับภาพเดิมทุกอย่าง (ไม่กระทบความเร็วปกติ)
+    rect = getattr(grab, "rect", None)
+    if not rect: return grab
+    st = {"n": 0, "prev": None}
+    def sec():
+        im = sl.grab(rect)
+        b = im.tobytes()
+        if b != st["prev"]: st["n"] += 1; st["prev"] = b
+        return im
+    def wg():
+        if sl.active():
+            try:
+                im = sec(); wg.sig = ("s", st["n"]); return im
+            except Exception as e:
+                log_err(e)
+        r = grab(); wg.sig = getattr(grab, "sig", None); return r
+    def wr():
+        if sl.active():
+            try:
+                im = sec(); wg.sig = ("s", st["n"]); return im.size, im.tobytes("raw", "BGRX")
+            except Exception as e:
+                log_err(e)
+        r = grab.raw(); wg.sig = getattr(grab, "sig", None); return r
+    wg.rect = rect
+    if hasattr(grab, "raw"): wg.raw = wr
+    return wg
+
+def uac_notifier(client, gone, lock, sl=None):  # แจ้งฝั่งผู้คุม (แพ็กเก็ต B) เมื่อปลายทางเข้า/ออกจากหน้าต่าง UAC รุ่นเก่าข้ามแพ็กเก็ตนี้เอง
     cur, cnt = False, 0
     while not gone.wait(0.4):
-        now = secure_desktop_active()
+        now = secure_desktop_active() and not (sl is not None and sl.usable())  # ส่วน SYSTEM พร้อม = ภาพมาตามปกติ ไม่ต้องขึ้นข้อความ
         if now == cur: cnt = 0; continue
         cnt += 1
         if cnt < 2: continue  # ต้องเห็นซ้ำ 2 รอบกันกะพริบ
@@ -1182,15 +1506,17 @@ def handle_control_client(client, q=1, h264=False, mon_idx=1, who=""):
     if maxw == 0: maxw = 1 << 16
     lock = threading.Lock()
     watcher_add(who)
+    sl = SysLink() if cfg.get("sys_on") and is_admin() else None
     try:
         client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         client.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)  # เล็กไว้: ภาพที่ค้างในบัฟเฟอร์คือภาพเก่า (512KB ทำให้หน่วงเพิ่ม 2-3 เท่าบนลิงก์ช้า ความเร็วเท่าเดิม)
         grab = make_grabber(mon_idx)
+        if sl is not None: grab = sys_wrap(grab, sl)
         w, h = grab().size
         client.sendall(w.to_bytes(4, "little") + h.to_bytes(4, "little"))
         gone = threading.Event()
-        threading.Thread(target=apply_input_loop, args=(client, gone, lock), daemon=True).start()
-        threading.Thread(target=uac_notifier, args=(client, gone, lock), daemon=True).start()
+        threading.Thread(target=apply_input_loop, args=(client, gone, lock), kwargs={"sysl": sl}, daemon=True).start()
+        threading.Thread(target=uac_notifier, args=(client, gone, lock, sl), daemon=True).start()
         if q == 3:  # โหมดเอกสาร
             stream_rects(client, grab, gone, lock, fps)
             return
@@ -1254,10 +1580,11 @@ def handle_control_client(client, q=1, h264=False, mon_idx=1, who=""):
         log_err(e)
     finally:
         watcher_remove(who)
+        if sl is not None: sl.close()
         try: client.close()
         except Exception: pass
 
-def apply_input_loop(client, gone, lock, files_only=False):
+def apply_input_loop(client, gone, lock, files_only=False, sysl=None):
     fh, rem, fp = None, 0, None
     cancel = threading.Event()
     def reply(t, d):  # ตอบกลับฝั่งส่ง (W วางแล้ว / R ปฏิเสธ) รุ่นเก่าไม่รู้จัก ข้ามไปเฉยๆ
@@ -1276,25 +1603,31 @@ def apply_input_loop(client, gone, lock, files_only=False):
                 b = recv_exact(client, 8)
                 x = int.from_bytes(b[0:4], "little", signed=True)
                 y = int.from_bytes(b[4:8], "little", signed=True)
-                set_cursor(x, y)
+                if sysl is not None and sysl.active(): sysl.inp(b"M" + b)  # Secure Desktop: ส่งให้ส่วน SYSTEM
+                else: set_cursor(x, y)
             elif t == "D":
                 b = recv_exact(client, 1)[0]
-                mouse_event(MOUSE_FLAGS_DOWN.get(b, 0x0002))
+                if sysl is not None and sysl.active(): sysl.inp(b"D" + bytes([b]))
+                else: mouse_event(MOUSE_FLAGS_DOWN.get(b, 0x0002))
             elif t == "U":
                 b = recv_exact(client, 1)[0]
-                mouse_event(MOUSE_FLAGS_UP.get(b, 0x0004))
+                if sysl is not None and sysl.active(): sysl.inp(b"U" + bytes([b]))
+                else: mouse_event(MOUSE_FLAGS_UP.get(b, 0x0004))
             elif t == "W":
                 b = recv_exact(client, 4)
                 delta = int.from_bytes(b, "little", signed=True)
-                mouse_event(0x0800, ctypes.c_uint32(delta).value)
+                if sysl is not None and sysl.active(): sysl.inp(b"W" + b)
+                else: mouse_event(0x0800, ctypes.c_uint32(delta).value)
             elif t == "K":
                 b = recv_exact(client, 4)
                 vk = int.from_bytes(b, "little", signed=True)
-                keybd_event(vk, False)
+                if sysl is not None and sysl.active(): sysl.inp(b"K" + b)
+                else: keybd_event(vk, False)
             elif t == "J":
                 b = recv_exact(client, 4)
                 vk = int.from_bytes(b, "little", signed=True)
-                keybd_event(vk, True)
+                if sysl is not None and sysl.active(): sysl.inp(b"J" + b)
+                else: keybd_event(vk, True)
             elif t == "F":  # เริ่มรับไฟล์: ชื่อ(2+n) ขนาด(8) ชื่อมีพาธโฟลเดอร์นำหน้าได้ (3.2.0+) ไม่มี/ใช้ไม่ได้ = เดสก์ท็อป (รุ่นเก่าตัดเหลือชื่อไฟล์ วางที่เดสก์ท็อปเสมอ)
                 n = int.from_bytes(recv_exact(client, 2), "little")
                 name = recv_exact(client, n).decode("utf-8", "replace")
@@ -1841,6 +2174,7 @@ def main():
     threading.Thread(target=nb_poll, daemon=True).start()
     threading.Thread(target=ensure_firewall, daemon=True).start()
     threading.Thread(target=ensure_startup_task, daemon=True).start()
+    threading.Thread(target=sys_ensure, daemon=True).start()
 
     if not cfg.get("nb_mgmt_url"):
         cfg["nb_mgmt_url"] = DEFAULT_NB_URL
@@ -2209,6 +2543,47 @@ def main():
     tk.Checkbutton(sec_srv, text="ให้ UAC ขึ้นบนจอปกติ (ผู้คุมเห็น/ลองกดอนุญาตได้ ลดความปลอดภัยเครื่องนี้)", variable=uac_var, command=toggle_uac,
                    bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT, font=FNT(13),
                    anchor="w", justify="left", wraplength=S(520)).pack(fill="x", padx=16, pady=(0, 14))
+    sys_var = tk.BooleanVar(value=bool(cfg.get("sys_on", False)))
+    def toggle_sys():
+        want = sys_var.get()
+        def commit(on):
+            def work():
+                err = sys_task_set(on)
+                def done():
+                    if err:
+                        sys_var.set(not on)
+                        notify("ตั้งค่าส่วน SYSTEM ไม่สำเร็จ: " + err, True)
+                    else:
+                        cfg["sys_on"] = on; save_config(cfg)
+                        notify("เปิดส่วน SYSTEM แล้ว ผู้คุมกด UAC ได้" if on else "ปิดส่วน SYSTEM แล้ว")
+                root.after(0, done)
+            if not is_admin():
+                sys_var.set(not on); notify("ต้องเปิดโปรแกรมแบบ admin ก่อน", True); return
+            notify("กำลังตั้งค่า ...")
+            threading.Thread(target=work, daemon=True).start()
+        if want:
+            ask_yes("เปิดส่วน SYSTEM", "จะติดตั้งงานเบื้องหลังที่รันด้วยสิทธิ์ SYSTEM เพื่อให้ผู้คุมที่ได้รับอนุญาตเห็นและกดหน้าต่าง UAC หรือหน้าจอล็อกของเครื่องนี้ได้ (ผู้คุมต้องผ่านการอนุญาตเชื่อมต่อตามปกติก่อน) ความเสี่ยง: ผู้คุมจะทำงานระดับ admin ได้ทันที ปิดได้ทุกเมื่อด้วยการเอาติ๊กออก ยืนยันหรือไม่?",
+                    lambda: commit(True), lambda: sys_var.set(False))
+        else:
+            commit(False)
+    tk.Checkbutton(sec_srv, text="ให้ผู้คุมกด UAC / ใช้หน้าจอล็อกได้ (ส่วน SYSTEM ปิดไว้เป็นค่าเริ่มต้น)", variable=sys_var, command=toggle_sys,
+                   bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT, font=FNT(13),
+                   anchor="w", justify="left", wraplength=S(520)).pack(fill="x", padx=16, pady=(0, 6))
+    def rollback():
+        bak = os.path.abspath(__file__) + ".bak"
+        if not os.path.exists(bak):
+            notify("ไม่มีไฟล์รุ่นเก่า (.bak) ให้ย้อนกลับ ต้องเคยอัปเดตมาก่อน", True); return
+        def go():
+            try:
+                with open(bak, "rb") as f: data = f.read()
+                compile(data.decode("utf-8-sig"), "bak", "exec")
+                if cfg.get("sys_on") and is_admin(): sys_task_set(False)  # รุ่นเก่าไม่รู้จักส่วน SYSTEM
+                cfg["sys_on"] = False; save_config(cfg)
+                apply_update(data)
+            except Exception as e:
+                log_err(e); notify("ย้อนกลับไม่สำเร็จ: " + str(e)[:120], True)
+        ask_yes("ย้อนกลับรุ่นเก่า", "ย้อนกลับเป็นรุ่นก่อนหน้า (ไฟล์สำรอง .bak จากการอัปเดตครั้งล่าสุด) และปิดส่วน SYSTEM แล้วเปิดโปรแกรมใหม่ ยืนยันหรือไม่? (ถ้ามีรุ่นใหม่กว่าบน GitHub จะแจ้งเตือนอีกครั้งตอนเปิดโปรแกรม แต่ไม่โหลดเอง)", go)
+    ttk.Button(sec_srv, text="ย้อนกลับเป็นรุ่นก่อนหน้า", style="Ghost.TButton", command=rollback).pack(anchor="w", padx=16, pady=(0, 14))
     sbind(left)
 
     rhead = tk.Frame(right, bg=PANEL)
