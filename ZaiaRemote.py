@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "7.0.0"
+APP_VER = "7.1.0"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -1414,33 +1414,43 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
     root = ROOT[0]
     if root is None: return
     win = tk.Toplevel(root)
-    win.title("Play poker — ป๊อกเด้ง"); win.geometry("1100x780"); win.configure(bg="#150a2e"); win.resizable(False, False)
+    win.title("Play poker — ป๊อกเด้ง"); win.geometry("1100x780"); win.configure(bg="#150a2e"); win.resizable(True, True); win.minsize(770, 548)
     try: win.iconbitmap(ICON_PATH)
     except Exception: pass
-    F = lambda n, b=False: ("Segoe UI", n, "bold") if b else ("Segoe UI", n)
+    KK = {"k": 1.0}
+    F = lambda n, b=False: ("Segoe UI", max(6, round(n * KK["k"])), "bold") if b else ("Segoe UI", max(6, round(n * KK["k"])))
     W, H, CX, CY = 1100, 780, 550, 318
     st = {"m": None, "t0": time.time(), "sock": None, "dead": False, "shown": {}, "flip": {}, "q": [], "busy": False, "prevhid": {},
           "lay": {}, "bet": POK_MIN, "note": "", "pop": 0}
-    cv = tk.Canvas(win, width=W, height=H, bg="#150a2e", highlightthickness=0); cv.pack()
+    cv = tk.Canvas(win, width=W, height=H, bg="#150a2e", highlightthickness=0); cv.pack(expand=True)
     DECK = (710, 112)
 
     def rr(x1, y1, x2, y2, r, **kw):  # สี่เหลี่ยมมุมมน
         p = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
         return cv.create_polygon(p, smooth=True, splinesteps=10, **kw)
-    # ---- พื้นหลัง/โต๊ะ (วาดครั้งเดียว) ----
-    for i in range(52):
-        t = i / 51
-        col = "#%02x%02x%02x" % (int(26 + 4 * t), int(10 + 28 * t), int(58 + 30 * t))
-        cv.create_rectangle(0, i * H / 52, W, (i + 1) * H / 52 + 1, fill=col, outline=col)
-    cv.create_oval(34, 62, W - 34, 580, fill="#0a0420", outline="")
-    cv.create_oval(40, 66, W - 40, 572, fill="#3b2a78", outline="#8a6cf0", width=5)
-    cv.create_oval(66, 90, W - 66, 548, fill="#0c7a48", outline="#e6c34a", width=4)
-    cv.create_oval(190, 112, W - 190, 330, fill="#ffffff", outline="", stipple="gray12")
-    cv.create_oval(120, 130, W - 120, 508, outline="#139a5d", width=2)
-    cv.create_text(CX, 318, text="ป๊อกเด้ง", fill="#139a5d", font=F(54, True))
-    for k in range(3):
-        rr(DECK[0] - 24 + k * 2, DECK[1] - 32 - k * 2, DECK[0] + 24 + k * 2, DECK[1] + 32 - k * 2, 6, fill="#2a3f9a", outline="#ffffff", width=2)
-    cv.create_text(DECK[0], DECK[1], text="♣", fill="#9fb4ff", font=F(20))
+    # ---- พื้นหลัง/โต๊ะ ----
+    def build_bg():
+        cv.delete("bg"); old_ids = set(cv.find_all())
+        for i in range(52):
+            t = i / 51
+            col = "#%02x%02x%02x" % (int(26 + 4 * t), int(10 + 28 * t), int(58 + 30 * t))
+            cv.create_rectangle(0, i * H / 52, W, (i + 1) * H / 52 + 1, fill=col, outline=col)
+        cv.create_oval(34, 62, W - 34, 580, fill="#0a0420", outline="")
+        cv.create_oval(40, 66, W - 40, 572, fill="#3b2a78", outline="#8a6cf0", width=5)
+        cv.create_oval(66, 90, W - 66, 548, fill="#0c7a48", outline="#e6c34a", width=4)
+        cv.create_oval(190, 112, W - 190, 330, fill="#ffffff", outline="", stipple="gray12")
+        cv.create_oval(120, 130, W - 120, 508, outline="#139a5d", width=2)
+        cv.create_text(CX, 318, text="ป๊อกเด้ง", fill="#139a5d", font=F(54, True))
+        for k in range(3):
+            rr(DECK[0] - 24 + k * 2, DECK[1] - 32 - k * 2, DECK[0] + 24 + k * 2, DECK[1] + 32 - k * 2, 6, fill="#2a3f9a", outline="#ffffff", width=2)
+        cv.create_text(DECK[0], DECK[1], text="♣", fill="#9fb4ff", font=F(20))
+        for i_ in set(cv.find_all()) - old_ids: cv.addtag_withtag("bg", f"{i_}")
+        cv.scale("bg", 0, 0, KK["k"], KK["k"]); cv.tag_lower("bg")
+    build_bg()
+
+    def fit(tag):
+        k = KK["k"]
+        if k != 1.0: cv.scale(tag, 0, 0, k, k)
 
     def card(x, y, c, tag, sx=1.0, back=None, big=1.0):
         big = 1.3 if big is True else (1.0 if big is False else big)
@@ -1534,6 +1544,8 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
         if snd: pok_snd(snd)
 
     def draw_banner():
+        draw_banner0(); fit("banner")
+    def draw_banner0():
         cv.delete("banner")
         m = st["m"]
         if not m:
@@ -1556,6 +1568,8 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
         cv.create_text(CX, 34, text=tx, fill=fg, font=F(17, True), tags="banner")
 
     def render():
+        render0(); fit("st"); fit("ui")
+    def render0():
         cv.delete("st"); cv.delete("ui")
         m = st["m"]
         draw_banner()
@@ -1647,12 +1661,12 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
         ex, ey = slot(key, idx)
         big = st["lay"].get(key, {}).get("s", 1.0)
         tag = f"fly{time.time_ns()}"
-        sx, sy = DECK; card(sx, sy, None, tag, big=big)
+        sx, sy = DECK; card(sx, sy, None, tag, big=big); fit(tag)
         steps = 9
         def stepf(k):
             if st["dead"]: return
             if k < steps:
-                cv.move(tag, (ex - sx) / steps, (ey - sy) / steps); win.after(26, stepf, k + 1)
+                cv.move(tag, (ex - sx) / steps * KK["k"], (ey - sy) / steps * KK["k"]); win.after(26, stepf, k + 1)
             else:
                 cv.delete(tag); pok_snd("deal")
                 st["shown"][key] = idx + 1; st["busy"] = False
@@ -1680,8 +1694,9 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
                 it = cv.create_rectangle(x0, 80, x0 + 8, 92, fill=cc, outline="", tags="pop")
                 def fall(it=it, n=0, vx=random.randint(-3, 3), vy=random.randint(6, 12)):
                     if st["dead"] or n > 40: return
-                    cv.move(it, vx, vy); win.after(35, fall, it, n + 1, vx, vy)
+                    cv.move(it, vx * KK["k"], vy * KK["k"]); win.after(35, fall, it, n + 1, vx, vy)
                 win.after(random.randint(0, 400), fall)
+        fit("pop")
         win.after(2400, lambda: cv.delete("pop"))
     def on_state(o):
         prev = st["m"]
@@ -1753,6 +1768,21 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
         try: st["sock"].close()
         except Exception: pass
         win.destroy()
+    RZ = {"j": None}
+    def do_resize():
+        RZ["j"] = None
+        if st["dead"]: return
+        k = max(0.5, min(win.winfo_width() / W, win.winfo_height() / H))
+        if abs(k - KK["k"]) < 0.01: return
+        KK["k"] = k
+        cv.config(width=int(W * k), height=int(H * k))
+        build_bg(); render()
+    def on_cfg(e):
+        if e.widget is win:
+            if RZ["j"]: win.after_cancel(RZ["j"])
+            RZ["j"] = win.after(90, do_resize)
+    win.bind("<Configure>", on_cfg)
+    win.bind("<F11>", lambda e: win.attributes("-fullscreen", not win.attributes("-fullscreen")))
     win.protocol("WM_DELETE_WINDOW", close)
     threading.Thread(target=reader, daemon=True).start()
     render(); tickui()
