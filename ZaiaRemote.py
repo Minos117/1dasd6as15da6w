@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "6.0.0"
+APP_VER = "6.1.0"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -1368,6 +1368,34 @@ def poker_open_table():  # เปิดโต๊ะของเครื่อ�
     return tb
 
 
+POK_SND = {  # เสียง 8-bit: (ความถี่ Hz, มิลลิวินาที) ความถี่ 0 = เงียบ
+    "deal": [(1200, 22), (900, 25)], "flip": [(660, 25), (990, 40)], "bet": [(1320, 40), (1760, 70)],
+    "turn": [(988, 90), (0, 20), (1318, 150)], "hit": [(440, 40), (660, 70)], "stand": [(330, 90)],
+    "win": [(523, 90), (659, 90), (784, 90), (1047, 260)], "lose": [(392, 160), (330, 160), (262, 340)],
+    "tie": [(440, 110), (0, 30), (440, 110)]}
+
+def pok_wav(name, path):  # สร้างไฟล์เสียง WAV 8 บิตจากคลื่นสี่เหลี่ยม (เสียงแบบเกมเก่า)
+    import wave
+    rate, buf = 22050, bytearray()
+    for f, ms in POK_SND[name]:
+        n = int(rate * ms / 1000)
+        for i in range(n):
+            amp = 0 if f == 0 else int(44 * (1 - 0.5 * i / n))
+            buf.append(128 + (amp if int(2 * f * i / rate) % 2 == 0 else -amp))
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(1); w.setframerate(rate); w.writeframes(bytes(buf))
+
+def pok_snd(name):  # เล่นเสียงเกม (ปิดได้ด้วยปุ่มเสียงในหน้าต่างเกม) ไม่มีเสียง/พัง = ข้ามเงียบๆ
+    if cfg.get("poker_mute"): return
+    try:
+        import winsound
+        d = os.path.join(APPDIR, "poker_snd"); os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, name + ".wav")
+        if not os.path.exists(p): pok_wav(name, p)
+        winsound.PlaySound(p, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+    except Exception:
+        pass
+
 FELT, FELT2 = "#0b6b3f", "#0e7a4d"
 POK_RULES = ("กติกาป๊อกเด้ง (เหรียญเสมือน)\n"
              "• ไพ่ 52 ใบ A=1, 2-9 ตามแต้ม, 10 J Q K = 0 แต้มรวมเอาหลักหน่วย\n"
@@ -1383,7 +1411,7 @@ def poker_window(ip):  # หน้าต่างเกม: โต๊ะไพ�
     root = ROOT[0]
     if root is None: return
     win = tk.Toplevel(root)
-    win.title("Play poker — ป๊อกเด้ง"); win.geometry("1100x790"); win.configure(bg="#052e1c")
+    win.title("Play poker — ป๊อกเด้ง"); win.geometry("1100x840"); win.configure(bg="#052e1c")
     try: win.iconbitmap(ICON_PATH)
     except Exception: pass
     F = lambda n, b=False: ("Segoe UI", n, "bold") if b else ("Segoe UI", n)
@@ -1532,12 +1560,14 @@ def poker_window(ip):  # หน้าต่างเกม: โต๊ะไพ�
                 win.after(26, stepf, k + 1)
             else:
                 cv.delete(tag)
+                pok_snd("deal")
                 st["shown"][key] = idx + 1
                 st["busy"] = False
                 render()
                 win.after(40, run_q)
         stepf(0)
     def flip_run(keys):
+        pok_snd("flip")
         for k in keys: st["flip"][k] = 0.0
         def sf(n):
             if st["dead"]: return
@@ -1570,6 +1600,10 @@ def poker_window(ip):  # หน้าต่างเกม: โต๊ะไพ�
             now_hid = any(c is None for c in cs)
             if was and not now_hid and cs and not st["q"]: fl.append(k)
             st["prevhid"][k] = now_hid
+        if o["phase"] == "play" and o["turn"] == o["you"] and (prev is None or prev["phase"] != "play" or prev["turn"] != o["turn"]): pok_snd("turn")
+        if o["phase"] == "result" and (prev is None or prev["phase"] != "result"):  # เสียงผลของเรา หลังพลิกไพ่
+            mr = next((p["res"] for p in o["players"] if p["id"] == o["you"] and p["res"]), None)
+            if mr: win.after(1100, lambda: pok_snd(mr["o"] if mr["o"] in ("win", "lose") else "tie"))
         render(); run_q()
         if fl: flip_run(fl)
 
@@ -1594,7 +1628,10 @@ def poker_window(ip):  # หน้าต่างเกม: โต๊ะไพ�
     bet_var = tk.StringVar(value=str(POK_MIN))
     def tkb(parent, text, cmd, bg="#2e7d32"):
         return tk.Button(parent, text=text, command=cmd, bg=bg, fg="white", activebackground=bg, activeforeground="white", relief="flat", font=F(12, True), padx=12, pady=6)
-    r1 = tk.Frame(ctl, bg="#073d27"); r1.pack(fill="x", padx=10, pady=(8, 2))
+    def go(o, snd=None):
+        send(o)
+        if snd: pok_snd(snd)
+    r1 = tk.Frame(ctl, bg="#073d27"); r1.pack(padx=10, pady=(8, 2))  # แถวเดิมพัน (กึ่งกลาง)
     tk.Label(r1, text="เดิมพัน", bg="#073d27", fg="white", font=F(12)).pack(side="left")
     ent = tk.Entry(r1, textvariable=bet_var, width=9, font=F(13), justify="right"); ent.pack(side="left", padx=6)
     def add(n):
@@ -1604,17 +1641,25 @@ def poker_window(ip):  # หน้าต่างเกม: โต๊ะไพ�
     qb = [tkb(r1, f"+{n}", lambda n=n: add(n), "#455a64") for n in (100, 500, 1000)]
     for b in qb: b.pack(side="left", padx=2)
     allin = tkb(r1, "ทุ่มหมด", lambda: bet_var.set(str(me_coins())), "#6a1b9a"); allin.pack(side="left", padx=2)
-    b_bet = tkb(r1, "ลงเดิมพัน", lambda: send({"a": "bet", "v": bet_var.get()})); b_bet.pack(side="left", padx=(10, 2))
-    b_pass = tkb(r1, "ข้ามรอบ", lambda: send({"a": "pass"}), "#6d4c41"); b_pass.pack(side="left", padx=2)
-    r2 = tk.Frame(ctl, bg="#073d27"); r2.pack(fill="x", padx=10, pady=(2, 8))
-    b_hit = tkb(r2, "จั่ว", lambda: send({"a": "hit"}), "#1565c0"); b_hit.pack(side="left", padx=2)
-    b_stand = tkb(r2, "อยู่", lambda: send({"a": "stand"}), "#ef6c00"); b_stand.pack(side="left", padx=2)
-    b_deal = tkb(r2, "แจกไพ่เลย (เจ้าของโต๊ะ)", lambda: send({"a": "deal"}), "#00838f"); b_deal.pack(side="left", padx=(20, 2))
-    b_new = tkb(r2, "เริ่มโต๊ะใหม่ (เจ้าของโต๊ะ)", lambda: send({"a": "restart"}), "#c62828"); b_new.pack(side="left", padx=2)
+    b_bet = tkb(r1, "ลงเดิมพัน", lambda: go({"a": "bet", "v": bet_var.get()}, "bet")); b_bet.pack(side="left", padx=(10, 2))
+    b_pass = tkb(r1, "ข้ามรอบ", lambda: go({"a": "pass"}), "#6d4c41"); b_pass.pack(side="left", padx=2)
+    r3 = tk.Frame(ctl, bg="#073d27"); r3.pack(padx=10, pady=2)  # เจ้าของโต๊ะ / กติกา / เสียง
+    b_deal = tkb(r3, "แจกไพ่เลย (เจ้าของโต๊ะ)", lambda: go({"a": "deal"}), "#00838f"); b_deal.pack(side="left", padx=2)
+    b_new = tkb(r3, "เริ่มโต๊ะใหม่ (เจ้าของโต๊ะ)", lambda: go({"a": "restart"}), "#c62828"); b_new.pack(side="left", padx=2)
     def rules():
         w = tk.Toplevel(win); w.title("กติกา"); w.configure(bg=FELT)
         tk.Label(w, text=POK_RULES, bg=FELT, fg="white", font=F(12), justify="left", wraplength=640, padx=18, pady=14).pack()
-    tkb(r2, "กติกา", rules, "#455a64").pack(side="right", padx=2)
+    tkb(r3, "กติกา", rules, "#455a64").pack(side="left", padx=2)
+    def snd_txt(): return "เสียง: ปิด" if cfg.get("poker_mute") else "เสียง: เปิด"
+    def snd_toggle():
+        cfg["poker_mute"] = not cfg.get("poker_mute", False); save_config(cfg)
+        b_snd.config(text=snd_txt()); pok_snd("bet")
+    b_snd = tkb(r3, snd_txt(), snd_toggle, "#455a64"); b_snd.pack(side="left", padx=2)
+    r2 = tk.Frame(ctl, bg="#073d27"); r2.pack(padx=10, pady=(4, 10))  # จั่ว / อยู่ กลางด้านล่าง ปุ่มใหญ่
+    b_hit = tk.Button(r2, text="จั่ว", command=lambda: go({"a": "hit"}, "hit"), bg="#1565c0", fg="white", activebackground="#1565c0", activeforeground="white", relief="flat", font=F(18, True), width=9, pady=8)
+    b_hit.pack(side="left", padx=14)
+    b_stand = tk.Button(r2, text="อยู่", command=lambda: go({"a": "stand"}, "stand"), bg="#ef6c00", fg="white", activebackground="#ef6c00", activeforeground="white", relief="flat", font=F(18, True), width=9, pady=8)
+    b_stand.pack(side="left", padx=14)
     for b in qb + [allin, b_bet, b_pass, b_hit, b_stand, b_deal, b_new]: b.config(state="disabled")
 
     def tickui():
