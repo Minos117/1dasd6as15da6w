@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "6.1.0"
+APP_VER = "7.0.0"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -1403,53 +1403,72 @@ POK_RULES = ("กติกาป๊อกเด้ง (เหรียญเส�
              "• ผลัดกันเล่นทีละคนตามที่นั่ง ไม่ป๊อกจั่วเพิ่มได้ 1 ใบ หมดเวลา = อยู่ เจ้ามือบอทจั่วเมื่อได้ 0-4 แต้ม ถ้าเจ้ามือป๊อกทุกคนเปิดทันที\n"
              "• เด้ง: 2 ใบดอกเดียวกัน/เลขเดียวกัน = 2 เด้ง, 3 ใบดอกเดียวกัน/เรียง/เซียน (J Q K) = 3 เด้ง, ตอง/สเตรทฟลัช = 5 เด้ง\n"
              "• แต้มมากกว่าชนะ แต้มเท่ากันถ้าฝ่ายหนึ่งป๊อก (2 ใบ) ชนะอีกฝ่ายที่ได้แต้มเท่ากันด้วย 3 ใบ นอกนั้นเสมอ ผู้ชนะได้เดิมพัน x จำนวนเด้งของฝ่ายชนะ\n"
-             "• เจ้ามือเริ่ม 40,000 ผู้เล่นเริ่มคนละ 10,000 ที่นั่งไม่ครบ 4 จะมีบอทมานั่งแทน เจ้ามือหมดเหรียญ = จบโต๊ะ\n"
+             "• เจ้ามือเริ่ม 40,000 ผู้เล่นเริ่มคนละ 10,000 โต๊ะรองรับสูงสุด 8 คน ที่นั่งไม่ครบ 4 จะมีบอทมานั่งแทน เจ้ามือหมดเหรียญ = จบโต๊ะ\n"
              "• เป็นเกมเหรียญเสมือน เล่นเอาสนุก ไม่มีการเล่นพนันเงินจริง")
-CW, CH, GAP = 44, 62, 5  # ขนาดไพ่ใน canvas
+CW, CH, GAP = 40, 56, 4  # ขนาดไพ่ (ของเรา x1.3)
+POK_CHIPS = ((100, "#d32f2f"), (500, "#1976d2"), (1000, "#2e7d32"), (5000, "#6a1b9a"))
+POK_AV = ("#e53935", "#fb8c00", "#fdd835", "#43a047", "#00acc1", "#3949ab", "#8e24aa", "#6d4c41")
 
-def poker_window(ip):  # หน้าต่างเกม: โต๊ะไพ่วงรี มีแอนิเมชันแจกไพ่ และข้อความบอกว่าตาใคร
+def poker_window(ip):  # หน้าต่างเกมสไตล์เกมมือถือ: โต๊ะรองรับ 8 ที่นั่ง อวาตาร์ ชิป ปุ่มใหญ่ แอนิเมชันแจกไพ่ และข้อความบอกตา
+    import math
     root = ROOT[0]
     if root is None: return
     win = tk.Toplevel(root)
-    win.title("Play poker — ป๊อกเด้ง"); win.geometry("1100x840"); win.configure(bg="#052e1c")
+    win.title("Play poker — ป๊อกเด้ง"); win.geometry("1100x780"); win.configure(bg="#150a2e"); win.resizable(False, False)
     try: win.iconbitmap(ICON_PATH)
     except Exception: pass
     F = lambda n, b=False: ("Segoe UI", n, "bold") if b else ("Segoe UI", n)
-    W, H = 1100, 560
-    st = {"m": None, "t0": time.time(), "sock": None, "dead": False, "shown": {}, "flip": {}, "q": [], "busy": False, "prevhid": {}, "seen": -1}
-    cv = tk.Canvas(win, width=W, height=H, bg="#052e1c", highlightthickness=0); cv.pack()
-    # โต๊ะ: ขอบไม้ + พื้นสักหลาด
-    cv.create_oval(40, 50, W - 40, H - 20, fill="#6b4423", outline="#3e2714", width=4)
-    cv.create_oval(62, 70, W - 62, H - 40, fill=FELT, outline="#d4af37", width=3)
-    cv.create_oval(150, 120, W - 150, H - 100, outline="#118a52", width=2)
-    cv.create_text(W // 2, 262, text="ป๊อกเด้ง", fill="#118a52", font=F(46, True))
-    DECK = (W // 2 + 170, 120)
+    W, H, CX, CY = 1100, 780, 550, 318
+    st = {"m": None, "t0": time.time(), "sock": None, "dead": False, "shown": {}, "flip": {}, "q": [], "busy": False, "prevhid": {},
+          "lay": {}, "bet": POK_MIN, "note": "", "pop": 0}
+    cv = tk.Canvas(win, width=W, height=H, bg="#150a2e", highlightthickness=0); cv.pack()
+    DECK = (710, 112)
 
-    def seat_xy(i, n):  # ที่นั่งเรียงบนส่วนโค้งด้านล่างของโต๊ะ
-        if n == 1: return W // 2, 400
-        import math
-        a0, a1 = math.radians(158), math.radians(22)
-        th = a0 + (a1 - a0) * i / (n - 1)
-        return W // 2 + 430 * math.cos(th), 250 + 168 * math.sin(th)
-    def order(m):  # เรียงที่นั่งซ้าย->ขวา ให้ "เรา" อยู่กลางล่าง ลำดับตาไหลไปทางขวา
-        ps = m["players"]; n = len(ps)
-        idx = next((i for i, p in enumerate(ps) if p["id"] == m["you"]), 0)
-        S, c = ps[idx:] + ps[:idx], n // 2
-        return [S[(i - c) % n] for i in range(n)]
-    def slot(ax, ay, i): return ax + (i - 0.5) * (CW + GAP), ay
+    def rr(x1, y1, x2, y2, r, **kw):  # สี่เหลี่ยมมุมมน
+        p = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+        return cv.create_polygon(p, smooth=True, splinesteps=10, **kw)
+    # ---- พื้นหลัง/โต๊ะ (วาดครั้งเดียว) ----
+    for i in range(52):
+        t = i / 51
+        col = "#%02x%02x%02x" % (int(26 + 4 * t), int(10 + 28 * t), int(58 + 30 * t))
+        cv.create_rectangle(0, i * H / 52, W, (i + 1) * H / 52 + 1, fill=col, outline=col)
+    cv.create_oval(34, 62, W - 34, 580, fill="#0a0420", outline="")
+    cv.create_oval(40, 66, W - 40, 572, fill="#3b2a78", outline="#8a6cf0", width=5)
+    cv.create_oval(66, 90, W - 66, 548, fill="#0c7a48", outline="#e6c34a", width=4)
+    cv.create_oval(190, 112, W - 190, 330, fill="#ffffff", outline="", stipple="gray12")
+    cv.create_oval(120, 130, W - 120, 508, outline="#139a5d", width=2)
+    cv.create_text(CX, 318, text="ป๊อกเด้ง", fill="#139a5d", font=F(54, True))
+    for k in range(3):
+        rr(DECK[0] - 24 + k * 2, DECK[1] - 32 - k * 2, DECK[0] + 24 + k * 2, DECK[1] + 32 - k * 2, 6, fill="#2a3f9a", outline="#ffffff", width=2)
+    cv.create_text(DECK[0], DECK[1], text="♣", fill="#9fb4ff", font=F(20))
 
-    def card(x, y, c, tag, sx=1.0, back=None):  # วาดไพ่ตรงกลางที่ (x,y) ย่อความกว้างด้วย sx (ใช้ตอนพลิก)
-        w = max(2, CW * sx) / 2
+    def card(x, y, c, tag, sx=1.0, back=None, big=1.0):
+        big = 1.3 if big is True else (1.0 if big is False else big)
+        w0, h0 = CW * big, CH * big
+        w = max(2, w0 * sx) / 2
         if back is None: back = c is None
         if back:
-            cv.create_rectangle(x - w, y - CH / 2, x + w, y + CH / 2, fill="#1d3f9a", outline="#ffffff", width=2, tags=tag)
-            if sx > 0.5: cv.create_text(x, y, text="♣", fill="#9fb4ff", font=F(18), tags=tag)
+            rr(x - w, y - h0 / 2, x + w, y + h0 / 2, 6, fill="#2a3f9a", outline="#ffffff", width=2, tags=tag)
+            if sx > 0.5: cv.create_text(x, y, text="♣", fill="#9fb4ff", font=F(int(15 * big)), tags=tag)
         else:
             col = "#c62828" if c[1] in (1, 2) else "#111111"
-            cv.create_rectangle(x - w, y - CH / 2, x + w, y + CH / 2, fill="#ffffff", outline="#cccccc", width=2, tags=tag)
+            rr(x - w, y - h0 / 2, x + w, y + h0 / 2, 6, fill="#ffffff", outline="#cccccc", width=2, tags=tag)
             if sx > 0.6:
-                cv.create_text(x, y - 12, text=_POK_R[c[0]].replace("T", "10"), fill=col, font=F(14, True), tags=tag)
-                cv.create_text(x, y + 13, text=_POK_S[c[1]], fill=col, font=F(18), tags=tag)
+                cv.create_text(x, y - h0 * 0.17, text=_POK_R[c[0]].replace("T", "10"), fill=col, font=F(int(13 * big) + 1, True), tags=tag)
+                cv.create_text(x, y + h0 * 0.19, text=_POK_S[c[1]], fill=col, font=F(int(16 * big)), tags=tag)
+
+    def avatar(x, y, r, name, tag, ring=False, arc=None, crown=False, bot=False):
+        col = POK_AV[sum(map(ord, name)) % len(POK_AV)]
+        if ring: cv.create_oval(x - r - 7, y - r - 7, x + r + 7, y + r + 7, outline="#ffeb3b", width=4, tags=tag)
+        if arc is not None: cv.create_arc(x - r - 12, y - r - 12, x + r + 12, y + r + 12, start=90, extent=-359.9 * arc, style="arc", outline="#ff7043", width=5, tags=tag)
+        cv.create_oval(x - r, y - r, x + r, y + r, fill=col, outline="#ffffff", width=3, tags=tag)
+        cv.create_text(x, y + 1, text=name[:1].upper(), fill="#ffffff", font=F(int(r * 0.9), True), tags=tag)
+        if crown: cv.create_text(x, y - r - 12, text="♛", fill="#ffd54f", font=F(22, True), tags=tag)
+        if bot: rr(x + r - 14, y + r - 12, x + r + 12, y + r + 4, 5, fill="#37474f", outline="#ffffff", tags=tag); cv.create_text(x + r - 1, y + r - 4, text="BOT", fill="#ffffff", font=F(7, True), tags=tag)
+
+    def pill(x, y, w, text, fg, bg, tag, size=11, bold=True, outline=""):
+        rr(x - w / 2, y - 11, x + w / 2, y + 11, 11, fill=bg, outline=outline, tags=tag)
+        cv.create_text(x, y, text=text, fill=fg, font=F(size, bold), tags=tag)
 
     def me_p():
         m = st["m"]
@@ -1459,112 +1478,185 @@ def poker_window(ip):  # หน้าต่างเกม: โต๊ะไพ�
     def me_coins():
         p = me_p(); return p["coins"] if p else 0
 
+    def layout(m):  # ที่นั่งรอบโต๊ะ (เรานั่งล่างกลาง เจ้ามือบนกลาง ที่เหลือซ้าย/ขวา) รองรับ 8 ที่นั่ง
+        ps = m["players"]
+        idx = next((i for i, p in enumerate(ps) if p["id"] == m["you"]), 0)
+        S = ps[idx:] + ps[:idx]
+        rest = S[1:]; k = len(rest)
+        nl, nr = (k + 1) // 2, k // 2
+        lin = lambda a, b, n: [190 if False else (a + b) / 2] if n == 1 else [a + (b - a) * i / (n - 1) for i in range(n)]
+        angs = lin(150, 225, nl) + lin(315, 390, nr) if k > 2 else ([190, 350][:k] if k else [])
+        if k > 2: angs = (lin(150, 225, nl) if nl > 1 else [190]) + (lin(315, 390, nr) if nr > 1 else [350])
+        lay = {}
+        def put(p, x, y, big):
+            if big: cx_, cy_, sc, chip = CX, y - 100, 1.3, (CX + 120, y - 100)
+            else:
+                sg = 1 if x < CX else -1
+                cx_, cy_, sc = x + sg * 136, y - 4, 0.8
+                chip = (cx_, cy_ - 36)
+            lay[p["id"]] = {"x": x, "y": y, "big": big, "s": sc, "cx": cx_, "cy": cy_, "chip": chip, "p": p}
+        put(S[0], CX, 484, True)
+        for p, a in zip(rest, angs):
+            t = math.radians(a)
+            put(p, CX + 470 * math.cos(t), CY + 215 * math.sin(t) + 2, False)
+        lay["d"] = {"x": CX, "y": 112, "big": False, "s": 1.0, "cx": CX, "cy": 214}
+        st["lay"] = lay
+        return lay
+    def slot(key, i):
+        L = st["lay"].get(key)
+        if not L: return CX, CY
+        gap = CW * L["s"] + GAP
+        return L["cx"] + (i - 0.5) * gap, L["cy"]
+
+    def button(key, x, y, w, h, text, color, enabled, cb, size=15):
+        cv.tag_unbind(key, "<Button-1>")
+        col = color if enabled else "#4a4560"
+        rr(x - w / 2, y - h / 2 + 4, x + w / 2, y + h / 2 + 4, 14, fill="#0c0620", outline="", tags=("ui", key))
+        rr(x - w / 2, y - h / 2, x + w / 2, y + h / 2, 14, fill=col, outline="#ffffff" if enabled else "#6b6585", width=2, tags=("ui", key))
+        rr(x - w / 2 + 5, y - h / 2 + 4, x + w / 2 - 5, y - h / 2 + h * 0.42, 9, fill="#ffffff", outline="", stipple="gray25" if enabled else "gray12", tags=("ui", key))
+        cv.create_text(x, y, text=text, fill="#ffffff" if enabled else "#9a94b0", font=F(size, True), tags=("ui", key))
+        if enabled: cv.tag_bind(key, "<Button-1>", lambda e: cb())
+
+    def chipbtn(key, x, y, val, color, enabled, cb):
+        cv.tag_unbind(key, "<Button-1>")
+        c = color if enabled else "#4a4560"
+        cv.create_oval(x - 30, y - 26, x + 30, y + 34, fill="#0c0620", outline="", tags=("ui", key))
+        cv.create_oval(x - 30, y - 30, x + 30, y + 30, fill=c, outline="#ffffff", width=3, tags=("ui", key))
+        cv.create_oval(x - 22, y - 22, x + 22, y + 22, outline="#ffffff", width=2, dash=(5, 4), tags=("ui", key))
+        cv.create_text(x, y, text=f"{val:,}", fill="#ffffff", font=F(11, True), tags=("ui", key))
+        if enabled: cv.tag_bind(key, "<Button-1>", lambda e: cb())
+
+    def send(o):
+        try: st["sock"].sendall((json.dumps(o) + "\n").encode("utf-8"))
+        except Exception: pass
+    def go(o, snd=None):
+        send(o)
+        if snd: pok_snd(snd)
+
     def draw_banner():
         cv.delete("banner")
         m = st["m"]
-        if not m: return
-        left = max(0, m["left"] - int(time.time() - st["t0"]))
-        ph, turn = m["phase"], m["turn"]
-        if ph == "play":
-            who = next((p for p in m["players"] if p["id"] == turn), None)
-            mine = turn == m["you"]
-            tx = "ตาของคุณ — จั่ว หรือ อยู่?" if mine else f"ตาของ {who['name'] if who else ''}"
-            tx += f"   ({left})"
-            bg, fg = ("#ffd54f", "#3e2714") if mine else ("#073d27", "#ffe082")
-        elif ph == "dealer": tx, bg, fg = "ตาของเจ้ามือ (บอท)", "#073d27", "#ffe082"
-        elif ph == "deal": tx, bg, fg = "กำลังแจกไพ่ ...", "#073d27", "#ffffff"
-        elif ph == "bet": tx, bg, fg = f"ลงเดิมพันได้เลย ({left})", "#073d27", "#ffffff"
-        else: tx, bg, fg = m["msg"], "#073d27", "#ffe082"
-        tw = max(260, len(tx) * 17)
-        cv.create_rectangle(W // 2 - tw // 2, 8, W // 2 + tw // 2, 48, fill=bg, outline="#ffd54f", width=2, tags="banner")
-        cv.create_text(W // 2, 28, text=tx, fill=fg, font=F(17, True), tags="banner")
+        if not m:
+            tx, bg, fg = st["note"] or "กำลังเชื่อมต่อ ...", "#2a1a5e", "#ffffff"
+        else:
+            left = max(0, m["left"] - int(time.time() - st["t0"]))
+            ph, turn = m["phase"], m["turn"]
+            if st["note"]: tx, bg, fg = st["note"], "#b71c1c", "#ffffff"
+            elif ph == "play":
+                who = next((p for p in m["players"] if p["id"] == turn), None)
+                mine = turn == m["you"]
+                tx = ("ตาของคุณ — จั่ว หรือ อยู่?" if mine else f"ตาของ {who['name'] if who else ''}") + f"  ⏱{left}"
+                bg, fg = ("#ffd54f", "#3e2714") if mine else ("#2a1a5e", "#ffe082")
+            elif ph == "dealer": tx, bg, fg = "ตาของเจ้ามือ (บอท)", "#2a1a5e", "#ffe082"
+            elif ph == "deal": tx, bg, fg = "กำลังแจกไพ่ ...", "#2a1a5e", "#ffffff"
+            elif ph == "bet": tx, bg, fg = f"ลงเดิมพันได้เลย  ⏱{left}", "#2a1a5e", "#ffffff"
+            else: tx, bg, fg = m["msg"], "#2a1a5e", "#ffe082"
+        tw = max(300, len(tx) * 17)
+        rr(CX - tw / 2, 12, CX + tw / 2, 56, 20, fill=bg, outline="#ffd54f", width=3, tags="banner")
+        cv.create_text(CX, 34, text=tx, fill=fg, font=F(17, True), tags="banner")
 
     def render():
-        cv.delete("st")
+        cv.delete("st"); cv.delete("ui")
         m = st["m"]
-        if not m: return
         draw_banner()
-        cv.create_text(W - 70, 70, text=f"รอบที่ {m['round']}", fill="#c8e6c9", font=F(12), tags="st")
+        if not m: return
+        mp = me_p()
+        lay = layout(m)
+        # HUD
+        pill(90, 34, 130, f"รอบที่ {m['round']}", "#ffffff", "#2a1a5e", "ui", 12, True, "#8a6cf0")
+        cv.create_oval(962, 22, 986, 46, fill="#ffca28", outline="#fff3b0", width=2, tags="ui"); cv.create_text(974, 34, text="$", fill="#7a5a00", font=F(12, True), tags="ui")
+        pill(1030, 34, 100, f"{mp['coins']:,}" if mp else "-", "#ffe082", "#2a1a5e", "ui", 13, True, "#8a6cf0")
+        button("b_snd", 870, 34, 84, 32, "เสียง " + ("ปิด" if cfg.get("poker_mute") else "เปิด"), "#455a64", True, snd_toggle, 11)
+        button("b_rul", 770, 34, 84, 32, "กติกา", "#455a64", True, rules, 11)
         # เจ้ามือ
-        dx, dy = W // 2, 118
-        cv.create_rectangle(dx - 105, 66, dx + 105, 86, fill="#073d27", outline="#d4af37", width=2, tags="st")
-        cv.create_text(dx, 76, text=f"เจ้ามือ (บอท)  เหรียญ {m['bank']:,}", fill="#ffe082", font=F(11, True), tags="st")
+        D = lay["d"]
+        avatar(D["x"], D["y"], 30, "เจ้ามือ", "st", crown=True)
+        pill(D["x"] - 100, D["y"] + 4, 120, "เจ้ามือ (บอท)", "#ffffff", "#1a1040", "st", 10)
+        pill(D["x"] - 100, D["y"] + 30, 120, f"{m['bank']:,}", "#ffe082", "#3b2a00", "st", 11, True, "#e6c34a")
         sh = st["shown"].get("d", 0)
         for i, c in enumerate(m["dealer"]["cards"][:sh]):
-            x, y = slot(dx, dy + 24, i)
-            fp = st["flip"].get("d")
+            x, y = slot("d", i); fp = st["flip"].get("d")
             if fp is not None: card(x, y, c, "st", *((1 - 2 * fp, True) if fp < 0.5 else (2 * fp - 1, False)))
             else: card(x, y, c, "st")
         if m["dealer"]["lab"] and st["flip"].get("d") is None and sh >= len(m["dealer"]["cards"]):
-            cv.create_text(dx, dy + 74, text=m["dealer"]["lab"], fill="#ffe082", font=F(13, True), tags="st")
-        # สำรับไพ่
-        for k in range(3): card(DECK[0] + k * 2, DECK[1] - k * 2, None, "st")
+            pill(D["cx"], D["cy"] + 46, 150, m["dealer"]["lab"], "#ffe082", "#1a1040", "st", 11)
         # ผู้เล่น
-        ps = order(m)
-        for i, p in enumerate(ps):
-            ax, ay = seat_xy(i, len(ps))
-            me, turn = p["id"] == m["you"], p["id"] == m["turn"] and m["phase"] == "play"
-            cv.create_rectangle(ax - 72, ay + 4, ax + 72, ay + 50, fill="#0a3d26" if not me else "#14532d", outline="#ffeb3b" if turn else ("#ffd54f" if me else "#2e7d32"), width=5 if turn else 2, tags="st")
-            cv.create_text(ax, ay + 19, text=p["name"] + (" (คุณ)" if me else ""), fill="white", font=F(11, True), tags="st")
-            cv.create_text(ax, ay + 38, text=f"เหรียญ {p['coins']:,}", fill="#c8e6c9", font=F(10), tags="st")
-            if turn: cv.create_text(ax, ay - 92, text="▼", fill="#ffeb3b", font=F(18, True), tags="st")
+        for key, L in lay.items():
+            if key == "d": continue
+            p, x, y = L["p"], L["x"], L["y"]
+            me = p["id"] == m["you"]; turn = p["id"] == m["turn"] and m["phase"] == "play"
+            frac = max(0.0, min(1.0, (m["left"] - (time.time() - st["t0"])) / (POK_T_TURN + 0.6))) if turn else None
+            avatar(x, y, 30 if me else 26, p["name"], "st", ring=turn, arc=frac, bot=p["bot"])
+            pill(x, y + (44 if me else 40), 150 if me else 134, p["name"] + (" (คุณ)" if me else "") + "  " + f"{p['coins']:,}", "#ffe082", "#1a1040", "st", 10, True, "#ffd54f" if me else "#8a6cf0")
             sh = st["shown"].get(p["id"], 0)
             for j, c in enumerate(p["cards"][:sh]):
-                x, y = slot(ax, ay - 30, j)
-                fp = st["flip"].get(p["id"])
-                if fp is not None: card(x, y, c, "st", *((1 - 2 * fp, True) if fp < 0.5 else (2 * fp - 1, False)))
-                else: card(x, y, c, "st")
-            if p["bet"] and m["phase"] != "result":
-                cv.create_oval(ax - 62, ay + 54, ax - 36, ay + 80, fill="#d4af37", outline="#fff3b0", width=2, tags="st")
-                cv.create_text(ax + 6, ay + 67, text=f"{p['bet']:,}", fill="#ffe082", font=F(11, True), tags="st")
-            elif p["pass"] and m["phase"] == "bet": cv.create_text(ax, ay + 67, text="ข้ามรอบ", fill="#bbb", font=F(10), tags="st")
-            if p["lab"] and st["flip"].get(p["id"]) is None and sh >= len(p["cards"]):
-                cv.create_text(ax, ay - 74, text=p["lab"], fill="#ffe082", font=F(11, True), tags="st")
-            r = p["res"]
-            if r and st["flip"].get(p["id"]) is None and m["phase"] in ("result", "over"):
-                t2 = {"win": f"ชนะ +{r['amt']:,}" + (f" ({r['mult']} เด้ง)" if r["mult"] > 1 else ""), "lose": f"แพ้ -{r['amt']:,}" + (f" ({r['mult']} เด้ง)" if r["mult"] > 1 else ""), "tie": "เสมอ"}[r["o"]]
-                cv.create_text(ax, ay + 68, text=t2, fill={"win": "#69f0ae", "lose": "#ff8a80", "tie": "#ffffff"}[r["o"]], font=F(13, True), tags="st")
-        mp = me_p()
-        bet_ok = m["phase"] == "bet" and mp is not None and mp["coins"] > 0
+                cx_, cy_ = slot(p["id"], j); fp = st["flip"].get(p["id"])
+                if fp is not None: card(cx_, cy_, c, "st", *((1 - 2 * fp, True) if fp < 0.5 else (2 * fp - 1, False)), big=L["s"])
+                else: card(cx_, cy_, c, "st", big=L["s"])
+            ch = CH * L["s"]
+            r = p["res"]; done = st["flip"].get(p["id"]) is None and sh >= len(p["cards"])
+            fin = bool(r) and m["phase"] in ("result", "over")
+            if done and (p["lab"] or fin):
+                txt = p["lab"]
+                if fin:
+                    t2 = {"win": f"+{r['amt']:,}", "lose": f"-{r['amt']:,}", "tie": "เสมอ"}[r["o"]]
+                    txt = (txt + "  " if txt else "") + t2
+                pill(L["cx"], L["cy"] + ch / 2 + 14, max(100, len(txt) * 7 + 22), txt, "#ffffff" if fin else "#ffe082",
+                     {"win": "#2e7d32", "lose": "#c62828", "tie": "#546e7a"}[r["o"]] if fin else "#1a1040", "st", 10, True, "#ffffff" if fin else "")
+            if p["bet"] and m["phase"] not in ("result", "over"):
+                bx, by = L["chip"]
+                cv.create_oval(bx - 15, by - 15, bx + 15, by + 15, fill="#d32f2f" if p["bet"] < 500 else "#1976d2" if p["bet"] < 1000 else "#2e7d32" if p["bet"] < 5000 else "#6a1b9a", outline="#ffffff", width=2, tags="st")
+                cv.create_text(bx, by + 1, text=f"{p['bet']:,}" if p["bet"] < 1000 else f"{p['bet']/1000:g}k", fill="#ffffff", font=F(8, True), tags="st")
+            elif p["pass"] and m["phase"] == "bet": pill(L["cx"], L["cy"], 80, "ข้ามรอบ", "#cfcfcf", "#1a1040", "st", 10)
+        # ปุ่มด้านล่าง
+        rr(0, 592, W, H, 0, fill="#0c0620", outline="", tags="ui")
+        cv.create_line(0, 592, W, 592, fill="#8a6cf0", width=3, tags="ui")
+        coins = mp["coins"] if mp else 0
+        bet_ok = m["phase"] == "bet" and mp is not None and coins > 0
         play_ok = m["phase"] == "play" and m["turn"] == m["you"]
-        set_en = lambda b, ok: b.config(state="normal" if ok else "disabled")
-        for b in qb + [allin, b_bet, b_pass]: set_en(b, bet_ok)
-        ent.config(state="normal" if bet_ok else "disabled")
-        set_en(b_hit, play_ok and mp is not None and len(mp["cards"]) == 2); set_en(b_stand, play_ok)
-        set_en(b_deal, m["owner"] and m["phase"] == "bet"); set_en(b_new, m["owner"] and m["phase"] == "over")
-        info.config(text=("เหรียญหมด — ออกแล้วเข้าโต๊ะใหม่เพื่อเริ่ม 10,000 อีกครั้ง" if mp is not None and mp["coins"] <= 0 and m["phase"] != "result" else m["msg"]))
+        st["bet"] = max(min(POK_MIN, coins) if coins else 0, min(st["bet"], coins))
+        if m["phase"] in ("bet", "deal"):
+            pill(CX, 622, 240, f"เดิมพัน  {st['bet']:,}", "#ffe082", "#2a1a5e", "ui", 15, True, "#e6c34a")
+            button("b_all", 372, 622, 86, 34, "ทุ่มหมด", "#8e24aa", bet_ok, lambda: setbet(coins), 11)
+            button("b_clr", 728, 622, 86, 34, "ล้าง", "#546e7a", bet_ok, lambda: setbet(POK_MIN), 11)
+            for i, (v, col) in enumerate(POK_CHIPS):
+                chipbtn(f"c{v}", 427 + i * 82, 678, v, col, bet_ok, lambda v=v: setbet(st["bet"] + v))
+            button("b_pass", 215, 702, 150, 56, "ข้ามรอบ", "#6d4c41", bet_ok, lambda: go({"a": "pass"}), 14)
+            button("b_bet", 880, 702, 230, 60, "ลงเดิมพัน", "#2e9e3a", bet_ok, lambda: go({"a": "bet", "v": st["bet"]}, "bet"), 18)
+            if m["owner"]: button("b_deal", 215, 650, 150, 38, "แจกไพ่เลย", "#00838f", m["phase"] == "bet", lambda: go({"a": "deal"}), 12)
+        else:
+            button("b_hit", 300, 700, 250, 76, "จั่ว", "#1976d2", play_ok and mp is not None and len(mp["cards"]) == 2, lambda: go({"a": "hit"}, "hit"), 24)
+            button("b_stand", 800, 700, 250, 76, "อยู่", "#ef6c00", play_ok, lambda: go({"a": "stand"}, "stand"), 24)
+            if m["owner"] and m["phase"] == "over": button("b_new", 550, 700, 260, 60, "เริ่มโต๊ะใหม่", "#c62828", True, lambda: go({"a": "restart"}), 16)
+        if mp is not None and mp["coins"] <= 0 and m["phase"] != "result":
+            pill(CX, 570, 520, "เหรียญหมด — ปิดแล้วเข้าโต๊ะใหม่เพื่อเริ่ม 10,000 อีกครั้ง", "#ffffff", "#b71c1c", "ui", 12)
+    def setbet(v):
+        m = st["m"]; coins = me_coins()
+        st["bet"] = max(min(POK_MIN, coins), min(int(v), coins)); render()
+    def snd_toggle():
+        cfg["poker_mute"] = not cfg.get("poker_mute", False); save_config(cfg); pok_snd("bet"); render()
+    def rules():
+        w = tk.Toplevel(win); w.title("กติกา"); w.configure(bg="#2a1a5e")
+        tk.Label(w, text=POK_RULES, bg="#2a1a5e", fg="white", font=F(12), justify="left", wraplength=640, padx=18, pady=14).pack()
 
     # ---- แอนิเมชัน ----
-    def seat_pos(key, idx):
-        m = st["m"]
-        if key == "d": return slot(W // 2, 142, idx)
-        ps = order(m)
-        for i, p in enumerate(ps):
-            if p["id"] == key:
-                ax, ay = seat_xy(i, len(ps)); return slot(ax, ay - 30, idx)
-        return W // 2, 300
     def run_q():
-        if st["busy"] or st["dead"]: return
-        if not st["q"]: return
+        if st["busy"] or st["dead"] or not st["q"]: return
         key, idx = st["q"].pop(0)
         st["busy"] = True
-        ex, ey = seat_pos(key, idx)
-        tag = f"fly{id(object())}{idx}"
-        sx, sy = DECK
-        card(sx, sy, None, tag)
+        ex, ey = slot(key, idx)
+        big = st["lay"].get(key, {}).get("s", 1.0)
+        tag = f"fly{time.time_ns()}"
+        sx, sy = DECK; card(sx, sy, None, tag, big=big)
         steps = 9
         def stepf(k):
             if st["dead"]: return
             if k < steps:
-                cv.move(tag, (ex - sx) / steps, (ey - sy) / steps)
-                win.after(26, stepf, k + 1)
+                cv.move(tag, (ex - sx) / steps, (ey - sy) / steps); win.after(26, stepf, k + 1)
             else:
-                cv.delete(tag)
-                pok_snd("deal")
-                st["shown"][key] = idx + 1
-                st["busy"] = False
-                render()
-                win.after(40, run_q)
+                cv.delete(tag); pok_snd("deal")
+                st["shown"][key] = idx + 1; st["busy"] = False
+                render(); win.after(40, run_q)
         stepf(0)
     def flip_run(keys):
         pok_snd("flip")
@@ -1578,94 +1670,64 @@ def poker_window(ip):  # หน้าต่างเกม: โต๊ะไพ�
             render()
             if n <= 9: win.after(32, sf, n + 1)
         sf(0)
-
+    def popup(txt, col):  # ข้อความชนะ/แพ้ ใหญ่กลางโต๊ะ + confetti
+        import random
+        cv.delete("pop")
+        for dx, dy, c in ((3, 3, "#000000"), (0, 0, col)): cv.create_text(CX + dx, 330 + dy, text=txt, fill=c, font=F(48, True), tags="pop")
+        if col == "#69f0ae":
+            for _ in range(36):
+                x0 = random.randint(120, 980); cc = random.choice(["#ffeb3b", "#ff5252", "#40c4ff", "#69f0ae", "#e040fb"])
+                it = cv.create_rectangle(x0, 80, x0 + 8, 92, fill=cc, outline="", tags="pop")
+                def fall(it=it, n=0, vx=random.randint(-3, 3), vy=random.randint(6, 12)):
+                    if st["dead"] or n > 40: return
+                    cv.move(it, vx, vy); win.after(35, fall, it, n + 1, vx, vy)
+                win.after(random.randint(0, 400), fall)
+        win.after(2400, lambda: cv.delete("pop"))
     def on_state(o):
         prev = st["m"]
-        st["m"], st["t0"] = o, time.time()
+        st["m"], st["t0"], st["note"] = o, time.time(), ""
+        if o["phase"] == "bet" and (prev is None or prev["phase"] != "bet"): st["bet"] = max(st["bet"], POK_MIN)
         keys = {"d": o["dealer"]["cards"]}
         for p in o["players"]: keys[p["id"]] = p["cards"]
         for k in list(st["shown"]):
             if k not in keys: st["shown"].pop(k)
+        layout(o)
         newc = []
         for k, cs in keys.items():
-            if len(cs) < st["shown"].get(k, 0): st["shown"][k] = len(cs)  # รอบใหม่/เคลียร์ไพ่
+            if len(cs) < st["shown"].get(k, 0): st["shown"][k] = len(cs)
             have = st["shown"].get(k, 0) + sum(1 for q in st["q"] if q[0] == k)
             for i in range(have, len(cs)): newc.append((i, k))
-        newc.sort(key=lambda t: (t[0], 1 if t[1] == "d" else 0))  # แจกวนทีละใบ: ผู้เล่นก่อน เจ้ามือท้าย
+        newc.sort(key=lambda t: (t[0], 1 if t[1] == "d" else 0))
         st["q"] += [(k, i) for i, k in newc]
-        # เปิดไพ่: ไพ่ที่เคยคว่ำกลายเป็นหงาย
         fl = []
         for k, cs in keys.items():
-            was = st["prevhid"].get(k, False)
-            now_hid = any(c is None for c in cs)
+            was, now_hid = st["prevhid"].get(k, False), any(c is None for c in cs)
             if was and not now_hid and cs and not st["q"]: fl.append(k)
             st["prevhid"][k] = now_hid
         if o["phase"] == "play" and o["turn"] == o["you"] and (prev is None or prev["phase"] != "play" or prev["turn"] != o["turn"]): pok_snd("turn")
-        if o["phase"] == "result" and (prev is None or prev["phase"] != "result"):  # เสียงผลของเรา หลังพลิกไพ่
+        if o["phase"] == "result" and (prev is None or prev["phase"] != "result"):
             mr = next((p["res"] for p in o["players"] if p["id"] == o["you"] and p["res"]), None)
-            if mr: win.after(1100, lambda: pok_snd(mr["o"] if mr["o"] in ("win", "lose") else "tie"))
+            if mr:
+                def fin():
+                    pok_snd(mr["o"] if mr["o"] in ("win", "lose") else "tie")
+                    popup({"win": f"ชนะ +{mr['amt']:,}", "lose": f"แพ้ -{mr['amt']:,}", "tie": "เสมอ"}[mr["o"]], {"win": "#69f0ae", "lose": "#ff8a80", "tie": "#ffffff"}[mr["o"]])
+                win.after(1100, fin)
         render(); run_q()
         if fl: flip_run(fl)
-
     def on_msg(o):
         if st["dead"]: return
         t = o.get("t")
         if t == "st": on_state(o)
         elif t in ("none", "full", "closed"):
-            info.config(text={"none": "เครื่องนี้ยังไม่ได้เปิดโต๊ะ", "full": "โต๊ะเต็ม (สูงสุด 8 คน)", "closed": "เจ้าของโต๊ะปิดโต๊ะแล้ว"}[t])
-            for b in qb + [allin, b_bet, b_pass, b_hit, b_stand, b_deal, b_new]: b.config(state="disabled")
+            st["note"] = {"none": "เครื่องนี้ยังไม่ได้เปิดโต๊ะ", "full": "โต๊ะเต็ม (สูงสุด 8 คน)", "closed": "เจ้าของโต๊ะปิดโต๊ะแล้ว"}[t]
+            st["m"] = None if t != "closed" else st["m"]; render()
     def on_end():
         if st["dead"]: return
-        if not st["m"]: info.config(text="เชื่อมต่อโต๊ะไม่ได้ (เครื่องปลายทางอาจยังไม่ใช่รุ่น 6.0.0 หรือไม่ได้เปิดโต๊ะ)")
-        else: info.config(text=info.cget("text") + "   [หลุดการเชื่อมต่อ]")
-
-    # ---- ส่วนควบคุม ----
-    ctl = tk.Frame(win, bg="#073d27"); ctl.pack(fill="x", side="bottom")
-    info = tk.Label(win, text="กำลังเชื่อมต่อ ...", bg="#052e1c", fg="#ffe082", font=F(13, True)); info.pack(side="bottom", pady=4)
-    def send(o):
-        try: st["sock"].sendall((json.dumps(o) + "\n").encode("utf-8"))
-        except Exception: pass
-    bet_var = tk.StringVar(value=str(POK_MIN))
-    def tkb(parent, text, cmd, bg="#2e7d32"):
-        return tk.Button(parent, text=text, command=cmd, bg=bg, fg="white", activebackground=bg, activeforeground="white", relief="flat", font=F(12, True), padx=12, pady=6)
-    def go(o, snd=None):
-        send(o)
-        if snd: pok_snd(snd)
-    r1 = tk.Frame(ctl, bg="#073d27"); r1.pack(padx=10, pady=(8, 2))  # แถวเดิมพัน (กึ่งกลาง)
-    tk.Label(r1, text="เดิมพัน", bg="#073d27", fg="white", font=F(12)).pack(side="left")
-    ent = tk.Entry(r1, textvariable=bet_var, width=9, font=F(13), justify="right"); ent.pack(side="left", padx=6)
-    def add(n):
-        try: v = int(bet_var.get() or 0)
-        except ValueError: v = 0
-        bet_var.set(str(v + n))
-    qb = [tkb(r1, f"+{n}", lambda n=n: add(n), "#455a64") for n in (100, 500, 1000)]
-    for b in qb: b.pack(side="left", padx=2)
-    allin = tkb(r1, "ทุ่มหมด", lambda: bet_var.set(str(me_coins())), "#6a1b9a"); allin.pack(side="left", padx=2)
-    b_bet = tkb(r1, "ลงเดิมพัน", lambda: go({"a": "bet", "v": bet_var.get()}, "bet")); b_bet.pack(side="left", padx=(10, 2))
-    b_pass = tkb(r1, "ข้ามรอบ", lambda: go({"a": "pass"}), "#6d4c41"); b_pass.pack(side="left", padx=2)
-    r3 = tk.Frame(ctl, bg="#073d27"); r3.pack(padx=10, pady=2)  # เจ้าของโต๊ะ / กติกา / เสียง
-    b_deal = tkb(r3, "แจกไพ่เลย (เจ้าของโต๊ะ)", lambda: go({"a": "deal"}), "#00838f"); b_deal.pack(side="left", padx=2)
-    b_new = tkb(r3, "เริ่มโต๊ะใหม่ (เจ้าของโต๊ะ)", lambda: go({"a": "restart"}), "#c62828"); b_new.pack(side="left", padx=2)
-    def rules():
-        w = tk.Toplevel(win); w.title("กติกา"); w.configure(bg=FELT)
-        tk.Label(w, text=POK_RULES, bg=FELT, fg="white", font=F(12), justify="left", wraplength=640, padx=18, pady=14).pack()
-    tkb(r3, "กติกา", rules, "#455a64").pack(side="left", padx=2)
-    def snd_txt(): return "เสียง: ปิด" if cfg.get("poker_mute") else "เสียง: เปิด"
-    def snd_toggle():
-        cfg["poker_mute"] = not cfg.get("poker_mute", False); save_config(cfg)
-        b_snd.config(text=snd_txt()); pok_snd("bet")
-    b_snd = tkb(r3, snd_txt(), snd_toggle, "#455a64"); b_snd.pack(side="left", padx=2)
-    r2 = tk.Frame(ctl, bg="#073d27"); r2.pack(padx=10, pady=(4, 10))  # จั่ว / อยู่ กลางด้านล่าง ปุ่มใหญ่
-    b_hit = tk.Button(r2, text="จั่ว", command=lambda: go({"a": "hit"}, "hit"), bg="#1565c0", fg="white", activebackground="#1565c0", activeforeground="white", relief="flat", font=F(18, True), width=9, pady=8)
-    b_hit.pack(side="left", padx=14)
-    b_stand = tk.Button(r2, text="อยู่", command=lambda: go({"a": "stand"}, "stand"), bg="#ef6c00", fg="white", activebackground="#ef6c00", activeforeground="white", relief="flat", font=F(18, True), width=9, pady=8)
-    b_stand.pack(side="left", padx=14)
-    for b in qb + [allin, b_bet, b_pass, b_hit, b_stand, b_deal, b_new]: b.config(state="disabled")
-
+        st["note"] = "หลุดการเชื่อมต่อ" if st["m"] else "เชื่อมต่อโต๊ะไม่ได้ (เครื่องปลายทางอาจยังไม่ใช่รุ่น 6.0.0 ขึ้นไป หรือไม่ได้เปิดโต๊ะ)"
+        render()
     def tickui():
         if st["dead"]: return
-        draw_banner()
-        win.after(500, tickui)
+        draw_banner(); win.after(500, tickui)
     def reader():
         buf = b""
         try:
@@ -1693,7 +1755,7 @@ def poker_window(ip):  # หน้าต่างเกม: โต๊ะไพ�
         win.destroy()
     win.protocol("WM_DELETE_WINDOW", close)
     threading.Thread(target=reader, daemon=True).start()
-    tickui()
+    render(); tickui()
 
 def desktop_dir():
     buf = ctypes.create_unicode_buffer(260)
