@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "4.0.1"
+APP_VER = "5.0.0"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -1071,6 +1071,9 @@ def control_server():
                 except Exception: pass
                 client.close()
                 continue
+            if hello == b"G":  # เกมป๊อกเด้ง (5.0.0+) ไม่เห็นจอ ไม่คุมเครื่อง จึงไม่ต้องขออนุญาต
+                threading.Thread(target=poker_serve, args=(client, addr), daemon=True).start()
+                continue
             if hello == b"P" or hello == b"":
                 client.close()
                 continue
@@ -1087,6 +1090,391 @@ def control_server():
                 threading.Thread(target=handle_control_client, args=(client, q, h264 and av is not None, mon_idx, peer_code(addr[0])), daemon=True).start()
         except Exception as e:
             log_err(e)
+
+# ---------- Play poker: ป๊อกเด้ง (5.0.0) เหรียญเสมือน เล่นเอาสนุก ไม่มีเงินจริง ----------
+# เครื่องที่กดเปิดโต๊ะเป็นเจ้าของโต๊ะ (เซิร์ฟเวอร์) เจ้ามือคือบอท คนอื่นต่อเข้า TCP พอร์ตเดิม (47102) ด้วยไบต์เปิด "G" ไม่ต้องขออนุญาต ไม่เห็นจอ/ไม่คุมเครื่อง
+import random
+POK_BANK, POK_COINS, POK_MAX, POK_MIN = 40000, 10000, 8, 100
+POK_T_BET, POK_T_PLAY, POK_T_RES = 30, 20, 8
+_POK_R = "A23456789TJQK"
+_POK_S = "♠♥♦♣"
+
+def pok_info(cards):  # cards = [(rank 0-12, suit 0-3)] คืนแต้ม/ป๊อก/จำนวนเด้ง/ชื่อเรียก
+    val = sum(0 if r >= 9 else r + 1 for r, _ in cards) % 10
+    n, deng, tag = len(cards), 1, ""
+    pok = n == 2 and val >= 8
+    rs, ss = sorted(r for r, _ in cards), {s for _, s in cards}
+    if n == 2:
+        if cards[0][1] == cards[1][1] or cards[0][0] == cards[1][0]: deng = 2
+    elif n == 3:
+        trips, flush = rs[0] == rs[2], len(ss) == 1
+        straight = rs[1] == rs[0] + 1 and rs[2] == rs[1] + 1
+        if trips: deng, tag = 5, "ตอง"
+        elif straight and flush: deng, tag = 5, "สเตรทฟลัช"
+        elif rs[0] >= 10: deng, tag = 3, "เซียน"  # J Q K ครบสามใบ
+        elif straight: deng, tag = 3, "เรียง"
+        elif flush: deng = 3
+    lab = f"ป๊อก {val}" if pok else f"{val} แต้ม"
+    if tag: lab += " " + tag
+    if deng > 1: lab += f" {deng} เด้ง"
+    return {"val": val, "pok": pok, "deng": deng, "lab": lab}
+
+class PokTable:
+    def __init__(s):
+        s.lock = threading.RLock()
+        s.pl, s.nid, s.bank, s.phase, s.round = {}, 1, POK_BANK, "bet", 0
+        s.dealer, s.deck, s.msg, s.closed = [], [], "ลงเดิมพันได้เลย", False
+        s.deadline = time.time() + POK_T_BET
+        s.go_at = 0.0
+    # ---- ผู้เล่น ----
+    def join(s, name, send, owner):
+        with s.lock:
+            if len([p for p in s.pl.values() if not p["gone"]]) >= POK_MAX: return None
+            pid = s.nid; s.nid += 1
+            s.pl[pid] = {"id": pid, "name": (name or "ผู้เล่น")[:24], "coins": POK_COINS, "bet": 0, "pass": False, "in": False,
+                         "done": False, "cards": [], "res": None, "send": send, "owner": owner, "gone": False}
+            s.msg = f"{s.pl[pid]['name']} เข้าร่วมโต๊ะ"
+            s.sync(); s.push()
+            return pid
+    def leave(s, pid):
+        with s.lock:
+            p = s.pl.get(pid)
+            if not p: return
+            p["gone"] = True
+            if not p["in"]: del s.pl[pid]
+            elif s.phase == "play" and not p["done"]: p["done"] = True
+            s.msg = f"{p['name']} ออกจากโต๊ะ"
+            if p.get("owner"):  # เจ้าของโต๊ะออก = ปิดโต๊ะ แจ้งทุกคน
+                s.closed = True
+                for q in list(s.pl.values()):
+                    try: q["send"]({"t": "closed"})
+                    except Exception: pass
+                return
+            s.sync(); s.push()
+    def act(s, pid, a):
+        with s.lock:
+            p = s.pl.get(pid)
+            if not p or p["gone"] or s.closed: return
+            k = a.get("a")
+            if k == "bet" and s.phase == "bet":
+                try: v = int(a.get("v", 0))
+                except (TypeError, ValueError): return
+                if p["coins"] <= 0 or v < min(POK_MIN, p["coins"]) or v > p["coins"]: return
+                p["bet"], p["pass"] = v, False
+            elif k == "pass" and s.phase == "bet":
+                p["bet"], p["pass"] = 0, True
+            elif k == "deal" and s.phase == "bet" and p["owner"]:
+                if any(q["bet"] > 0 for q in s.pl.values() if not q["gone"]): s.start()
+                else: s.msg = "ยังไม่มีใครลงเดิมพัน"
+            elif k in ("hit", "stand") and s.phase == "play" and p["in"] and not p["done"]:
+                if k == "hit" and len(p["cards"]) == 2: p["cards"].append(s.deck.pop())
+                p["done"] = True
+                if all(q["done"] for q in s.pl.values() if q["in"]): s.finish()
+            elif k == "restart" and s.phase == "over" and p["owner"]:
+                s.bank, s.phase, s.msg = POK_BANK, "bet", "เริ่มโต๊ะใหม่ เจ้ามือมีเหรียญ %d" % POK_BANK
+                s.deadline = time.time() + POK_T_BET
+            s.sync(); s.push()
+    def sync(s):  # เริ่มรอบอัตโนมัติเมื่อทุกคนลงเดิมพัน/ข้ามแล้ว
+        if s.phase != "bet": s.go_at = 0.0; return
+        act = [q for q in s.pl.values() if not q["gone"] and q["coins"] > 0]
+        if act and all(q["bet"] > 0 or q["pass"] for q in act) and any(q["bet"] > 0 for q in act):
+            if not s.go_at: s.go_at = time.time() + 1.5
+        else: s.go_at = 0.0
+    # ---- รอบเล่น ----
+    def start(s):
+        d = [(r, c) for r in range(13) for c in range(4)]
+        random.SystemRandom().shuffle(d)
+        s.deck, s.go_at = d, 0.0
+        for p in list(s.pl.values()):
+            p["res"], p["cards"], p["in"], p["done"] = None, [], False, False
+            if p["gone"]: del s.pl[p["id"]]; continue
+            if p["bet"] > 0 and p["coins"] > 0:
+                p["in"], p["cards"] = True, [s.deck.pop(), s.deck.pop()]
+                p["bet"] = min(p["bet"], p["coins"])
+                p["done"] = pok_info(p["cards"])["pok"]
+        s.dealer = [s.deck.pop(), s.deck.pop()]
+        s.phase, s.deadline, s.msg = "play", time.time() + POK_T_PLAY, "จั่วหรืออยู่?"
+        if pok_info(s.dealer)["pok"] or all(q["done"] for q in s.pl.values() if q["in"]): s.finish()
+    def finish(s):
+        di = pok_info(s.dealer)
+        if not di["pok"] and di["val"] <= 4: s.dealer.append(s.deck.pop()); di = pok_info(s.dealer)  # บอทจั่วเมื่อแต้ม 0-4
+        win = []
+        for p in s.pl.values():  # คนแพ้จ่ายก่อน
+            if not p["in"]: continue
+            pi = pok_info(p["cards"])
+            pk, dk = (pi["val"], pi["pok"]), (di["val"], di["pok"])  # แต้มเท่ากัน: ป๊อก (2 ใบ) ชนะ 3 ใบ
+            if pk > dk: win.append((p, p["bet"] * pi["deng"], pi["deng"]))
+            elif pk < dk:
+                loss = min(p["bet"] * di["deng"], p["coins"])
+                p["coins"] -= loss; s.bank += loss
+                p["res"] = {"o": "lose", "amt": loss, "mult": di["deng"]}
+            else: p["res"] = {"o": "tie", "amt": 0, "mult": 1}
+        for p, amt, m in win:  # คนชนะรับตามลำดับที่นั่ง จ่ายได้ไม่เกินเงินที่เจ้ามือมี
+            pay = min(amt, s.bank)
+            s.bank -= pay; p["coins"] += pay
+            p["res"] = {"o": "win", "amt": pay, "mult": m, "part": pay < amt}
+        s.round += 1
+        s.phase, s.deadline = "result", time.time() + POK_T_RES
+        s.msg = "เจ้ามือ " + di["lab"]
+        for p in s.pl.values(): p["bet"], p["pass"] = 0, False
+    def tick(s):
+        with s.lock:
+            now = time.time()
+            if s.phase == "bet":
+                if s.go_at and now >= s.go_at: s.start()
+                elif now >= s.deadline:
+                    if any(p["bet"] > 0 for p in s.pl.values() if not p["gone"]): s.start()
+                    else: s.deadline = now + POK_T_BET
+            elif s.phase == "play" and now >= s.deadline:
+                for p in s.pl.values():
+                    if p["in"]: p["done"] = True
+                s.finish()
+            elif s.phase == "result" and now >= s.deadline:
+                if s.bank <= 0: s.phase, s.msg = "over", "เจ้ามือหมดตัว! เจ้าของโต๊ะกด 'เริ่มโต๊ะใหม่' ได้"
+                else: s.phase, s.msg, s.deadline = "bet", "ลงเดิมพันได้เลย", now + POK_T_BET
+                for p in list(s.pl.values()):
+                    if p["gone"]: del s.pl[p["id"]]
+            else: return
+            s.sync(); s.push()
+    # ---- ส่งสถานะ ----
+    def view(s, me):
+        rev = s.phase in ("result", "over")
+        def hid(n): return [None] * n
+        pls = []
+        for p in s.pl.values():
+            if p["gone"] and not p["in"]: continue
+            show = rev or p["id"] == me
+            pls.append({"id": p["id"], "name": p["name"], "coins": p["coins"], "bet": p["bet"], "pass": p["pass"], "in": p["in"],
+                        "done": p["done"], "cards": p["cards"] if show else hid(len(p["cards"])),
+                        "lab": pok_info(p["cards"])["lab"] if show and p["cards"] else "", "res": p["res"]})
+        return {"t": "st", "phase": s.phase, "round": s.round, "left": max(0, int(s.deadline - time.time())), "bank": s.bank, "you": me,
+                "owner": bool(s.pl.get(me, {}).get("owner")), "msg": s.msg,
+                "dealer": {"cards": s.dealer if rev else hid(len(s.dealer)), "lab": pok_info(s.dealer)["lab"] if rev and s.dealer else ""},
+                "players": pls}
+    def push(s):
+        for p in list(s.pl.values()):
+            if p["gone"]: continue
+            try: p["send"](s.view(p["id"]))
+            except Exception: p["gone"] = True
+
+POKER = {"table": None}
+
+def poker_ticker(tb):
+    while not tb.closed:
+        time.sleep(0.4)
+        try: tb.tick()
+        except Exception as e: log_err(e)
+
+def poker_serve(client, addr):  # เซิร์ฟเวอร์ฝั่งเจ้าของโต๊ะ: 1 การเชื่อมต่อ = 1 ผู้เล่น (ข้อความ JSON ทีละบรรทัด)
+    tb, pid = POKER["table"], None
+    slk = threading.Lock()
+    def send(o):
+        with slk: client.sendall((json.dumps(o, ensure_ascii=False) + "\n").encode("utf-8"))
+    try:
+        client.settimeout(5)
+        n = client.recv(1)
+        name = b""
+        while n and len(name) < n[0]:
+            d = client.recv(n[0] - len(name))
+            if not d: break
+            name += d
+        name = name.decode("utf-8", "replace")
+        if tb is None or tb.closed:
+            send({"t": "none"}); return
+        client.settimeout(10)
+        pid = tb.join(name, send, addr[0] == "127.0.0.1")
+        if pid is None:
+            send({"t": "full"}); return
+        client.settimeout(None)
+        buf = b""
+        while not tb.closed:
+            d = client.recv(4096)
+            if not d: break
+            buf += d
+            if len(buf) > 8192: break
+            while b"\n" in buf:
+                ln, buf = buf.split(b"\n", 1)
+                try: a = json.loads(ln.decode("utf-8"))
+                except ValueError: continue
+                if isinstance(a, dict): tb.act(pid, a)
+    except Exception as e:
+        log_err(e)
+    finally:
+        if pid is not None: tb.leave(pid)
+        try: client.close()
+        except Exception: pass
+
+def poker_open_table():  # เปิดโต๊ะของเครื่องนี้ (ถ้ามีโต๊ะเก่าที่ปิดแล้วจะเปิดใหม่) คืน PokTable
+    tb = POKER["table"]
+    if tb is None or tb.closed:
+        tb = POKER["table"] = PokTable()
+        threading.Thread(target=poker_ticker, args=(tb,), daemon=True).start()
+    return tb
+
+
+FELT, FELT2 = "#0b5d3b", "#0e7a4d"
+POK_RULES = ("กติกาป๊อกเด้ง (เหรียญเสมือน)\n"
+             "• ไพ่ 52 ใบ A=1, 2-9 ตามแต้ม, 10 J Q K = 0 แต้มรวมเอาหลักหน่วย\n"
+             "• แจกคนละ 2 ใบ ถ้ารวมได้ 8 หรือ 9 = ป๊อก (ชนะแต้มธรรมดา ไม่ต้องจั่ว)\n"
+             "• ไม่ป๊อกจั่วเพิ่มได้ 1 ใบ เจ้ามือบอทจั่วเมื่อได้ 0-4 แต้ม ถ้าเจ้ามือป๊อกทุกคนเปิดทันที\n"
+             "• เด้ง: 2 ใบดอกเดียวกัน/เลขเดียวกัน = 2 เด้ง, 3 ใบดอกเดียวกัน/เรียง/เซียน (J Q K) = 3 เด้ง, ตอง/สเตรทฟลัช = 5 เด้ง\n"
+             "• แต้มมากกว่าชนะ แต้มเท่ากันถ้าฝ่ายหนึ่งป๊อก (2 ใบ) ชนะอีกฝ่ายที่ได้แต้มเท่ากันด้วย 3 ใบ นอกนั้นเสมอ ผู้ชนะได้เดิมพัน x จำนวนเด้งของฝ่ายชนะ\n"
+             "• เจ้ามือเริ่ม 40,000 ผู้เล่นเริ่มคนละ 10,000 สูงสุด 8 คน เจ้ามือหมดเหรียญ = จบโต๊ะ\n"
+             "• เป็นเกมเหรียญเสมือน เล่นเอาสนุก ไม่มีการเล่นพนันเงินจริง")
+
+def poker_window(ip):  # หน้าต่างเกม (ผู้เล่นทุกคนรวมเจ้าของโต๊ะ ต่อมาที่เซิร์ฟเวอร์ของเจ้าของโต๊ะ)
+    root = ROOT[0]
+    if root is None: return
+    win = tk.Toplevel(root)
+    win.title("Play poker — ป๊อกเด้ง"); win.geometry("1000x720"); win.configure(bg=FELT)
+    try: win.iconbitmap(ICON_PATH)
+    except Exception: pass
+    F = lambda n, b=False: ("Segoe UI", n, "bold") if b else ("Segoe UI", n)
+    st = {"m": None, "t0": time.time(), "sock": None, "dead": False}
+    top = tk.Label(win, text="กำลังเชื่อมต่อ ...", bg="#073d27", fg="#ffffff", font=F(14, True), anchor="w", padx=14, pady=8)
+    top.pack(fill="x")
+    dl = tk.Frame(win, bg=FELT); dl.pack(fill="x", pady=(10, 4))
+    area = tk.Frame(win, bg=FELT); area.pack(fill="both", expand=True, padx=10)
+    msg = tk.Label(win, text="", bg=FELT, fg="#ffe082", font=F(14, True)); msg.pack(pady=4)
+    ctl = tk.Frame(win, bg="#073d27"); ctl.pack(fill="x")
+    CW, CH = 50, 72
+
+    def hand(parent, cards):
+        cv = tk.Canvas(parent, width=max(1, len(cards)) * (CW + 6) + 6, height=CH + 8, bg=parent["bg"], highlightthickness=0)
+        for i, c in enumerate(cards):
+            x = 6 + i * (CW + 6)
+            if c is None:
+                cv.create_rectangle(x, 4, x + CW, 4 + CH, fill="#1d3f9a", outline="#ffffff", width=2)
+                cv.create_text(x + CW // 2, 4 + CH // 2, text="♣", fill="#9fb4ff", font=F(22))
+            else:
+                col = "#c62828" if c[1] in (1, 2) else "#111111"
+                cv.create_rectangle(x, 4, x + CW, 4 + CH, fill="#ffffff", outline="#cccccc", width=2)
+                cv.create_text(x + CW // 2, 4 + CH // 2 - 14, text=_POK_R[c[0]].replace("T", "10"), fill=col, font=F(17, True))
+                cv.create_text(x + CW // 2, 4 + CH // 2 + 14, text=_POK_S[c[1]], fill=col, font=F(20))
+        return cv
+
+    def send(o):
+        try: st["sock"].sendall((json.dumps(o) + "\n").encode("utf-8"))
+        except Exception: pass
+
+    bet_var = tk.StringVar(value=str(POK_MIN))
+    def tkb(parent, text, cmd, bg="#2e7d32"):
+        b = tk.Button(parent, text=text, command=cmd, bg=bg, fg="white", activebackground=bg, activeforeground="white", relief="flat", font=F(12, True), padx=12, pady=6)
+        return b
+    r1 = tk.Frame(ctl, bg="#073d27"); r1.pack(fill="x", padx=10, pady=(8, 2))
+    tk.Label(r1, text="เดิมพัน", bg="#073d27", fg="white", font=F(12)).pack(side="left")
+    ent = tk.Entry(r1, textvariable=bet_var, width=9, font=F(13), justify="right"); ent.pack(side="left", padx=6)
+    def add(n):
+        try: v = int(bet_var.get() or 0)
+        except ValueError: v = 0
+        bet_var.set(str(v + n))
+    qb = [tkb(r1, f"+{n}", lambda n=n: add(n), "#455a64") for n in (100, 500, 1000)]
+    for b in qb: b.pack(side="left", padx=2)
+    allin = tkb(r1, "ทุ่มหมด", lambda: bet_var.set(str(me_coins())), "#6a1b9a"); allin.pack(side="left", padx=2)
+    b_bet = tkb(r1, "ลงเดิมพัน", lambda: send({"a": "bet", "v": bet_var.get()})); b_bet.pack(side="left", padx=(10, 2))
+    b_pass = tkb(r1, "ข้ามรอบ", lambda: send({"a": "pass"}), "#6d4c41"); b_pass.pack(side="left", padx=2)
+    r2 = tk.Frame(ctl, bg="#073d27"); r2.pack(fill="x", padx=10, pady=(2, 8))
+    b_hit = tkb(r2, "จั่ว", lambda: send({"a": "hit"}), "#1565c0"); b_hit.pack(side="left", padx=2)
+    b_stand = tkb(r2, "อยู่", lambda: send({"a": "stand"}), "#ef6c00"); b_stand.pack(side="left", padx=2)
+    b_deal = tkb(r2, "แจกไพ่เลย (เจ้าของโต๊ะ)", lambda: send({"a": "deal"}), "#00838f"); b_deal.pack(side="left", padx=(20, 2))
+    b_new = tkb(r2, "เริ่มโต๊ะใหม่ (เจ้าของโต๊ะ)", lambda: send({"a": "restart"}), "#c62828"); b_new.pack(side="left", padx=2)
+    def rules():
+        w = tk.Toplevel(win); w.title("กติกา"); w.configure(bg=FELT)
+        tk.Label(w, text=POK_RULES, bg=FELT, fg="white", font=F(12), justify="left", wraplength=620, padx=18, pady=14).pack()
+    tkb(r2, "กติกา", rules, "#455a64").pack(side="right", padx=2)
+
+    def me_p():
+        m = st["m"]
+        if not m: return None
+        for p in m["players"]:
+            if p["id"] == m["you"]: return p
+    def me_coins():
+        p = me_p(); return p["coins"] if p else 0
+
+    def render():
+        m = st["m"]
+        if not m: return
+        top.config(text=f"เจ้ามือ: บอท   เหรียญเจ้ามือ: {m['bank']:,}   รอบที่ {m['round']}   {'(เจ้าของโต๊ะ)' if m['owner'] else ''}")
+        for w in dl.winfo_children(): w.destroy()
+        tk.Label(dl, text="เจ้ามือ (บอท)", bg=FELT, fg="white", font=F(13, True)).pack()
+        hand(dl, m["dealer"]["cards"]).pack()
+        tk.Label(dl, text=m["dealer"]["lab"], bg=FELT, fg="#ffe082", font=F(12, True)).pack()
+        for w in area.winfo_children(): w.destroy()
+        for i, p in enumerate(m["players"]):
+            me = p["id"] == m["you"]
+            c = tk.Frame(area, bg=FELT2, highlightbackground="#ffd54f" if me else FELT, highlightthickness=3, padx=8, pady=6)
+            c.grid(row=i // 4, column=i % 4, padx=6, pady=6, sticky="n")
+            tk.Label(c, text=p["name"] + (" (คุณ)" if me else ""), bg=FELT2, fg="white", font=F(12, True)).pack()
+            tk.Label(c, text=f"เหรียญ {p['coins']:,}", bg=FELT2, fg="#c8e6c9", font=F(11)).pack()
+            if m["phase"] == "bet":
+                tx = f"เดิมพัน {p['bet']:,}" if p["bet"] else ("ข้ามรอบ" if p["pass"] else "รอลงเดิมพัน")
+            else:
+                tx = f"เดิมพัน {p['bet']:,}" if p["bet"] else ""
+            if m["phase"] in ("play",) and p["in"]: tx = ("รอ ..." if not p["done"] else "เสร็จแล้ว")
+            tk.Label(c, text=tx, bg=FELT2, fg="white", font=F(11)).pack()
+            hand(c, p["cards"]).pack()
+            tk.Label(c, text=p["lab"], bg=FELT2, fg="#ffe082", font=F(11, True)).pack()
+            r = p["res"]
+            if r:
+                t2 = {"win": f"ชนะ +{r['amt']:,}" + (f" ({r['mult']} เด้ง)" if r["mult"] > 1 else ""), "lose": f"แพ้ -{r['amt']:,}" + (f" ({r['mult']} เด้ง)" if r["mult"] > 1 else ""), "tie": "เสมอ"}[r["o"]]
+                if r.get("part"): t2 += " (เจ้ามือจ่ายได้เท่านี้)"
+                tk.Label(c, text=t2, bg=FELT2, fg={"win": "#69f0ae", "lose": "#ff8a80", "tie": "#ffffff"}[r["o"]], font=F(12, True)).pack()
+        mp = me_p()
+        bet_ok = m["phase"] == "bet" and mp is not None and mp["coins"] > 0
+        play_ok = m["phase"] == "play" and mp is not None and mp["in"] and not mp["done"]
+        set_en = lambda b, ok: b.config(state="normal" if ok else "disabled")
+        for b in qb + [allin, b_bet, b_pass]: set_en(b, bet_ok)
+        ent.config(state="normal" if bet_ok else "disabled")
+        set_en(b_hit, play_ok and len(mp["cards"]) == 2); set_en(b_stand, play_ok)
+        set_en(b_deal, m["owner"] and m["phase"] == "bet"); set_en(b_new, m["owner"] and m["phase"] == "over")
+        if mp is not None and mp["coins"] <= 0 and m["phase"] != "result": msg.config(text="เหรียญหมด — ออกแล้วเข้าโต๊ะใหม่เพื่อเริ่ม 10,000 อีกครั้ง")
+        else: msg.config(text=m["msg"] + (f"   (เหลือ {max(0, m['left'] - int(time.time() - st['t0']))} วินาที)" if m["phase"] in ("bet", "play") else ""))
+
+    def tickui():
+        if st["dead"]: return
+        if st["m"] and st["m"]["phase"] in ("bet", "play"):
+            msg.config(text=st["m"]["msg"] + f"   (เหลือ {max(0, st['m']['left'] - int(time.time() - st['t0']))} วินาที)") if not (me_p() and me_p()["coins"] <= 0) else None
+        win.after(500, tickui)
+
+    def on_msg(o):
+        if st["dead"]: return
+        t = o.get("t")
+        if t == "st": st["m"], st["t0"] = o, time.time(); render()
+        elif t in ("none", "full", "closed"):
+            top.config(text={"none": "เครื่องนี้ยังไม่ได้เปิดโต๊ะ", "full": "โต๊ะเต็ม (สูงสุด 8 คน)", "closed": "เจ้าของโต๊ะปิดโต๊ะแล้ว"}[t])
+            for b in qb + [allin, b_bet, b_pass, b_hit, b_stand, b_deal, b_new]: b.config(state="disabled")
+    def on_end():
+        if st["dead"]: return
+        if not st["m"]: top.config(text="เชื่อมต่อโต๊ะไม่ได้ (เครื่องปลายทางอาจยังไม่ใช่รุ่น 5.0.0 หรือไม่ได้เปิดโต๊ะ)")
+        else: top.config(text=top.cget("text") + "   [หลุดการเชื่อมต่อ]")
+    def reader():
+        buf = b""
+        try:
+            s = socket.create_connection((ip, CTRL_PORT), timeout=6)
+            st["sock"] = s
+            nb = (username() or HOSTNAME).encode("utf-8")[:60]
+            s.sendall(b"G" + bytes([len(nb)]) + nb)
+            s.settimeout(None)
+            while True:
+                d = s.recv(65536)
+                if not d: break
+                buf += d
+                while b"\n" in buf:
+                    ln, buf = buf.split(b"\n", 1)
+                    try: o = json.loads(ln.decode("utf-8"))
+                    except ValueError: continue
+                    root.after(0, on_msg, o)
+        except Exception as e:
+            log_err(e)
+        root.after(0, on_end)
+    def close():
+        st["dead"] = True
+        try: st["sock"].close()
+        except Exception: pass
+        win.destroy()
+    win.protocol("WM_DELETE_WINDOW", close)
+    threading.Thread(target=reader, daemon=True).start()
+    tickui()
 
 def desktop_dir():
     buf = ctypes.create_unicode_buffer(260)
@@ -2628,6 +3016,29 @@ def main():
     crow.pack(side="bottom", fill="x", padx=16, pady=12)
     add_flow(crow, ttk.Button(crow, text="ดูจอเครื่องที่เลือก", style="Go.TButton", command=do_connect))
     add_flow(crow, ttk.Button(crow, text="ต่อด้วยเลข IP", style="Ghost.TButton", command=connect_ip))
+    def play_poker():
+        dim, w, c = popup("Play poker (ป๊อกเด้ง)")
+        tk.Label(w, text="เจ้ามือเป็นบอท เหรียญเสมือน เล่นเอาสนุก ไม่ใช่เงินจริง\nเปิดโต๊ะที่เครื่องนี้ หรือเข้าร่วมโต๊ะของเครื่องที่เลือกในรายการ", bg=c(PANEL), fg=c(SUBTEXT), font=FNT(13), justify="left",
+                 wraplength=max(min(S(620), root.winfo_width() - S(120)), S(240))).pack(anchor="w", padx=S(24), pady=(0, S(8)))
+        def host():
+            dim.destroy()
+            poker_open_table()
+            poker_window("127.0.0.1")
+        def join():
+            sel_item = tree.selection()
+            if not sel_item:
+                dim.destroy(); notify("คลิกเลือกเครื่องของเจ้าของโต๊ะในรายการก่อน", True); return
+            uid = sel_item[0]
+            ip = str(tree.item(uid)["values"][3])
+            if uid == MY_ID or ip == "-":
+                dim.destroy(); notify("เลือกเครื่องอื่นที่เปิดโต๊ะไว้ (ไม่ใช่เครื่องตัวเอง/เครื่องที่ซ่อนอยู่)", True); return
+            dim.destroy()
+            poker_window(ip)
+        row = tk.Frame(w, bg=c(PANEL)); row.pack(fill="x", padx=S(24), pady=(S(8), S(20)))
+        ttk.Button(row, text="เปิดโต๊ะที่เครื่องนี้", style="Go.TButton", command=host).pack(side="right")
+        ttk.Button(row, text="เข้าร่วมโต๊ะของเครื่องที่เลือก", style="Go.TButton", command=join).pack(side="right", padx=10)
+        ttk.Button(row, text="ยกเลิก", style="Ghost.TButton", command=dim.destroy).pack(side="right")
+    add_flow(crow, ttk.Button(crow, text="Play poker", style="Go.TButton", command=play_poker))
 
     cols = ("host", "user", "status", "ip", "ping", "ver", "ips")
     COLS_N = ("host", "user", "status", "ver")  # โหมดธรรมดาไม่แสดง IP (ยังเก็บค่าไว้ใช้เชื่อมต่อ); โหมดแอดมินแสดง IP และ ping
