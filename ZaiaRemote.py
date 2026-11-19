@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "9.1.1"
+APP_VER = "9.1.2"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -1577,7 +1577,7 @@ def poker_window(ip, myname=None):  # หน้าต่างเกมสไต
         cv.create_oval(34, 62, W - 34, 580, fill="#0a0420", outline="")
         cv.create_oval(40, 66, W - 40, 572, fill="#3b2a78", outline="#8a6cf0", width=5)
         cv.create_oval(66, 90, W - 66, 548, fill="#0c7a48", outline="#e6c34a", width=4)
-        cv.create_oval(190, 112, W - 190, 330, fill="#ffffff", outline="", stipple="gray12")
+        cv.create_oval(190, 112, W - 190, 330, fill="#0f8a52", outline="")
         cv.create_oval(120, 130, W - 120, 508, outline="#139a5d", width=2)
         cv.create_text(CX, 318, text="ป๊อกเด้ง", fill="#139a5d", font=F(54, True))
         for k in range(3):
@@ -2500,7 +2500,7 @@ def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball �
         rr(FX - 34, FY - 34, FX + 1034, FY + 534, 30, fill="#6b3a17", outline="#8a5426", width=3, tags="bg")
         rr(FX - 12, FY - 12, FX + 1012, FY + 512, 12, fill="#0a5c34", outline="#06361e", width=3, tags="bg")
         cv.create_rectangle(FX, FY, FX + 1000, FY + 500, fill="#12804a", outline="#0b5a33", width=2, tags="bg")
-        cv.create_oval(FX + 140, FY + 60, FX + 860, FY + 440, fill="#16905a", outline="", stipple="gray25", tags="bg")
+        cv.create_oval(FX + 140, FY + 60, FX + 860, FY + 440, fill="#16905a", outline="", tags="bg")
         cv.create_line(FX + 250, FY, FX + 250, FY + 500, fill="#0f6e3e", width=2, tags="bg")
         cv.create_oval(FX + 246, FY + 246, FX + 254, FY + 254, fill="#0f6e3e", outline="", tags="bg")
         cv.create_oval(FX + 716, FY + 246, FX + 724, FY + 254, fill="#0f6e3e", outline="", tags="bg")
@@ -2519,7 +2519,7 @@ def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball �
     # ---------- ลูกบิลเลียด ----------
     def mk_ball(n):
         r = R; col = PL_BCOL.get(n if n <= 8 else n - 8, "#ffffff")
-        ids = [cv.create_oval(0, 0, 1, 1, fill="#000000", outline="", stipple="gray50", tags="ball")]
+        ids = [cv.create_oval(0, 0, 1, 1, fill="#0a4a2e", outline="", tags="ball")]
         if n == 0 or n <= 8: ids.append(cv.create_oval(0, 0, 1, 1, fill="#f7f7f2" if n == 0 else col, outline="#222222", width=1, tags="ball"))
         else:
             ids.append(cv.create_oval(0, 0, 1, 1, fill=col, outline="#222222", width=1, tags="ball"))
@@ -2528,7 +2528,7 @@ def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball �
         if n:
             ids.append(cv.create_oval(0, 0, 1, 1, fill="#f7f7f2", outline="", tags="ball"))
             ids.append(cv.create_text(0, 0, text=str(n), fill="#111111", font=F(8, True), tags="ball"))
-        else: ids.append(cv.create_oval(0, 0, 1, 1, fill="#ffffff", outline="", stipple="gray50", tags="ball"))
+        else: ids.append(cv.create_oval(0, 0, 1, 1, fill="#fbfbf6", outline="", tags="ball"))
         return ids
     def place_ball(n, x, y):
         ids = st["items"].get(n)
@@ -2590,7 +2590,7 @@ def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball �
             if mine():
                 ok = st["m"] and all(n == 0 or math.hypot(b[1] - st["mx"] + FX, b[2] - st["my"] + FY) >= 2 * R + 0.5 for n, b in st["balls"].items()) and R <= st["mx"] - FX <= PL_W - R and R <= st["my"] - FY <= PL_H - R
                 x, y = tcoord(min(max(st["mx"] - FX, R), PL_W - R), min(max(st["my"] - FY, R), PL_H - R)); r = R * k
-                cv.create_oval(x - r, y - r, x + r, y + r, fill="#f7f7f2", outline="#3ddc84" if ok else "#ff5252", width=3, tags="dyn", stipple="gray50")
+                cv.create_oval(x - r, y - r, x + r, y + r, fill="", outline="#3ddc84" if ok else "#ff5252", width=3, tags="dyn")
             return
         if m["phase"] != "aim": return
         me_ = mine()
