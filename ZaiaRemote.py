@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "9.0.0"
+APP_VER = "9.1.0"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -1338,6 +1338,8 @@ class PokTable:
             except Exception: p["gone"] = True
 
 POKER = {"table": None}
+RETRO = [False]  # ธีม Retro 8-bit (หน้าต่างเกมที่เปิดใหม่จะอ่านค่านี้)
+def PF(): return "Courier New" if RETRO[0] else "Segoe UI"
 POK_ACTIVE = [0]  # จำนวนหน้าต่าง Play poker ที่เปิดอยู่ในเครื่องนี้ (>0 = ประกาศในรายชื่อว่ากำลังเล่น)
 
 def poker_ticker(tb):
@@ -1443,12 +1445,12 @@ def poker_show_invite(who, ip, game="poker"):  # หน้าต่างถา�
     d = tk.Toplevel(root); d.title("ชวนเล่นเกม"); d.configure(bg="#2a1a5e"); d.resizable(False, False)
     try: d.attributes("-topmost", True)
     except Exception: pass
-    tk.Label(d, text=f"{who} ชวนคุณเล่น" + ("พูล 8-ball" if game == "pool" else "ป๊อกเด้ง"), bg="#2a1a5e", fg="#ffe082", font=("Segoe UI", 14, "bold")).pack(padx=28, pady=(18, 4))
-    tk.Label(d, text="เล่นเอาสนุก ไม่มีเงินจริง", bg="#2a1a5e", fg="white", font=("Segoe UI", 11)).pack(padx=28)
+    tk.Label(d, text=f"{who} ชวนคุณเล่น" + ("พูล 8-ball" if game == "pool" else "ป๊อกเด้ง"), bg="#2a1a5e", fg="#ffe082", font=(PF(), 14, "bold")).pack(padx=28, pady=(18, 4))
+    tk.Label(d, text="เล่นเอาสนุก ไม่มีเงินจริง", bg="#2a1a5e", fg="white", font=(PF(), 11)).pack(padx=28)
     row = tk.Frame(d, bg="#2a1a5e"); row.pack(pady=16)
     def yes(): d.destroy(); poker_start(ip, False, game)
-    tk.Button(row, text="เข้าร่วม", bg="#2e9e3a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=18, pady=4, command=yes).pack(side="left", padx=8)
-    tk.Button(row, text="ไม่เล่น", bg="#546e7a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=18, pady=4, command=d.destroy).pack(side="left", padx=8)
+    tk.Button(row, text="เข้าร่วม", bg="#2e9e3a", fg="white", font=(PF(), 12, "bold"), relief="flat", padx=18, pady=4, command=yes).pack(side="left", padx=8)
+    tk.Button(row, text="ไม่เล่น", bg="#546e7a", fg="white", font=(PF(), 12, "bold"), relief="flat", padx=18, pady=4, command=d.destroy).pack(side="left", padx=8)
     d.after(60000, lambda: d.winfo_exists() and d.destroy())
     pok_snd("invite")
 
@@ -1458,9 +1460,9 @@ def poker_start(ip, host=False, game="poker"):  # ถามชื่อก่อ
     d = tk.Toplevel(root); d.title("ชื่อผู้เล่น"); d.configure(bg="#2a1a5e"); d.resizable(False, False)
     try: d.iconbitmap(ICON_PATH)
     except Exception: pass
-    tk.Label(d, text="ใส่ชื่อที่จะใช้ในโต๊ะนี้", bg="#2a1a5e", fg="white", font=("Segoe UI", 13, "bold")).pack(padx=28, pady=(18, 6))
+    tk.Label(d, text="ใส่ชื่อที่จะใช้ในโต๊ะนี้", bg="#2a1a5e", fg="white", font=(PF(), 13, "bold")).pack(padx=28, pady=(18, 6))
     v = tk.StringVar(value=(cfg.get("poker_name") or username() or HOSTNAME)[:16])
-    e = tk.Entry(d, textvariable=v, font=("Segoe UI", 14), width=20, justify="center"); e.pack(padx=28, pady=6)
+    e = tk.Entry(d, textvariable=v, font=(PF(), 14), width=20, justify="center"); e.pack(padx=28, pady=6)
     def ok(_=None):
         nm = "".join(c for c in v.get() if c.isprintable()).strip()[:16] or username() or HOSTNAME
         cfg["poker_name"] = nm
@@ -1474,8 +1476,8 @@ def poker_start(ip, host=False, game="poker"):  # ถามชื่อก่อ
             if host: poker_open_table()
             poker_window(ip, nm)
     row = tk.Frame(d, bg="#2a1a5e"); row.pack(pady=(8, 18))
-    tk.Button(row, text="เข้าโต๊ะ", bg="#2e9e3a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=18, pady=4, command=ok).pack(side="left", padx=8)
-    tk.Button(row, text="ยกเลิก", bg="#546e7a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=18, pady=4, command=d.destroy).pack(side="left", padx=8)
+    tk.Button(row, text="เข้าโต๊ะ", bg="#2e9e3a", fg="white", font=(PF(), 12, "bold"), relief="flat", padx=18, pady=4, command=ok).pack(side="left", padx=8)
+    tk.Button(row, text="ยกเลิก", bg="#546e7a", fg="white", font=(PF(), 12, "bold"), relief="flat", padx=18, pady=4, command=d.destroy).pack(side="left", padx=8)
     e.bind("<Return>", ok); d.bind("<Escape>", lambda _e: d.destroy())
     try:
         d.update_idletasks()
@@ -1487,7 +1489,7 @@ POK_SND = {  # เสียง 8-bit: (ความถี่ Hz, มิลลิ
     "deal": [(1200, 22), (900, 25)], "flip": [(660, 25), (990, 40)], "bet": [(1320, 40), (1760, 70)],
     "turn": [(988, 90), (0, 20), (1318, 150)], "hit": [(440, 40), (660, 70)], "stand": [(330, 90)],
     "win": [(523, 90), (659, 90), (784, 90), (1047, 260)], "lose": [(392, 160), (330, 160), (262, 340)],
-    "tie": [(440, 110), (0, 30), (440, 110)], "chat": [(1568, 35), (2093, 55)], "cue": [(160, 28), (1400, 14)], "clack": [(2200, 10), (1500, 16)], "rail": [(300, 22), (200, 26)], "pocket": [(700, 30), (450, 40), (240, 70)], "invite": [(880, 80), (1175, 80), (1568, 80), (0, 30), (1568, 160)]}
+    "tie": [(440, 110), (0, 30), (440, 110)], "chat": [(1568, 35), (2093, 55)], "cue": [(-1, 14), (180, 40), (1200, 18)], "clack": [(-1, 12), (2400, 14), (1400, 30), (900, 30)], "rail": [(-1, 10), (320, 40), (200, 50)], "pocket": [(-1, 14), (700, 40), (450, 50), (240, 90)], "invite": [(880, 80), (1175, 80), (1568, 80), (0, 30), (1568, 160)]}
 
 def pok_wav(name, path):  # สร้างไฟล์เสียง WAV 8 บิตจากคลื่นสี่เหลี่ยม (เสียงแบบเกมเก่า)
     import wave
@@ -1495,8 +1497,10 @@ def pok_wav(name, path):  # สร้างไฟล์เสียง WAV 8 บ
     for f, ms in POK_SND[name]:
         n = int(rate * ms / 1000)
         for i in range(n):
-            amp = 0 if f == 0 else int(44 * (1 - 0.5 * i / n))
-            buf.append(128 + (amp if int(2 * f * i / rate) % 2 == 0 else -amp))
+            top = 100 if name in ("cue", "clack", "rail", "pocket") else 44  # เสียงลูกพูลดังกว่าเสียงป๊อก
+            amp = 0 if f == 0 else int(top * (1 - 0.6 * i / n))
+            if f < 0: buf.append(128 + random.randint(-amp, amp))  # f = -1 -> เสียงแตกซ่า (noise) ให้เหมือนลูกกระทบกัน
+            else: buf.append(128 + (amp if int(2 * f * i / rate) % 2 == 0 else -amp))
     with wave.open(path, "wb") as w:
         w.setnchannels(1); w.setsampwidth(1); w.setframerate(rate); w.writeframes(bytes(buf))
 
@@ -1548,7 +1552,7 @@ def poker_window(ip, myname=None):  # หน้าต่างเกมสไต
     try: win.iconbitmap(ICON_PATH)
     except Exception: pass
     KK = {"k": 1.0}
-    F = lambda n, b=False: ("Segoe UI", max(6, round(n * KK["k"])), "bold") if b else ("Segoe UI", max(6, round(n * KK["k"])))
+    F = lambda n, b=False: (PF(), max(6, round(n * KK["k"])), "bold") if b else (PF(), max(6, round(n * KK["k"])))
     W, H, CX, CY = 1100, 780, 550, 318
     st = {"m": None, "t0": time.time(), "sock": None, "dead": False, "shown": {}, "flip": {}, "q": [], "busy": False, "prevhid": {},
           "lay": {}, "bet": POK_MIN, "note": "", "pop": 0, "throw": 0.0, "bank0": None, "bdelta": 0, "fr": 0, "ids": None, "me": "", "olist": []}
@@ -1559,7 +1563,8 @@ def poker_window(ip, myname=None):  # หน้าต่างเกมสไต
     cv = tk.Canvas(mid, width=W, height=H, bg="#150a2e", highlightthickness=0); cv.pack(expand=True)
     DECK = (710, 112)
 
-    def rr(x1, y1, x2, y2, r, **kw):  # สี่เหลี่ยมมุมมน
+    def rr(x1, y1, x2, y2, r, **kw):  # สี่เหลี่ยมมุมมน (ธีม Retro = มุมเหลี่ยม)
+        if RETRO[0]: return cv.create_polygon([x1, y1, x2, y1, x2, y2, x1, y2], **kw)
         p = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
         return cv.create_polygon(p, smooth=True, splinesteps=10, **kw)
     # ---- พื้นหลัง/โต๊ะ ----
@@ -1657,12 +1662,12 @@ def poker_window(ip, myname=None):  # หน้าต่างเกมสไต
         st["fr"] += 1; draw_dealer(); win.after(180, dealer_tick)
 
     # ---- แผงซ้าย: คนออนไลน์ + เชิญ / แผงขวา: แชท ----
-    tk.Label(left, text="คนออนไลน์", bg=PB, fg="#ffe082", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=12, pady=(12, 0))
-    lb_cnt = tk.Label(left, text="", bg=PB, fg="#b0a8d8", font=("Segoe UI", 9)); lb_cnt.pack(anchor="w", padx=12)
-    lbx = tk.Listbox(left, bg="#110a2b", fg="#ffffff", selectbackground="#6a3fd6", selectforeground="#ffffff", font=("Segoe UI", 11), relief="flat",
+    tk.Label(left, text="คนออนไลน์", bg=PB, fg="#ffe082", font=(PF(), 13, "bold")).pack(anchor="w", padx=12, pady=(12, 0))
+    lb_cnt = tk.Label(left, text="", bg=PB, fg="#b0a8d8", font=(PF(), 9)); lb_cnt.pack(anchor="w", padx=12)
+    lbx = tk.Listbox(left, bg="#110a2b", fg="#ffffff", selectbackground="#6a3fd6", selectforeground="#ffffff", font=(PF(), 11), relief="flat",
                      highlightthickness=0, activestyle="none", exportselection=False)
     lbx.pack(fill="both", expand=True, padx=10, pady=8)
-    inv_msg = tk.Label(left, text="เลือกชื่อแล้วกดเชิญ\n(ต้องเป็นรุ่น 8.0.0 ขึ้นไป)", bg=PB, fg="#b0a8d8", font=("Segoe UI", 9), wraplength=190, justify="left")
+    inv_msg = tk.Label(left, text="เลือกชื่อแล้วกดเชิญ\n(ต้องเป็นรุ่น 8.0.0 ขึ้นไป)", bg=PB, fg="#b0a8d8", font=(PF(), 9), wraplength=190, justify="left")
     inv_msg.pack(side="bottom", anchor="w", padx=12, pady=(0, 10))
     def do_invite():
         i = lbx.curselection()
@@ -1680,7 +1685,7 @@ def poker_window(ip, myname=None):  # หน้าต่างเกมสไต
                 if err is None: break
             root.after(0, lambda: inv_msg.config(text=("ส่งคำเชิญให้ " + who.lstrip("● ").split("  ")[0] + " แล้ว") if err is None else "ส่งไม่ได้: " + err[:60]))
         threading.Thread(target=work, daemon=True).start()
-    tk.Button(left, text="เชิญเข้าโต๊ะ", bg="#2e9e3a", fg="#ffffff", activebackground="#3cb84a", font=("Segoe UI", 12, "bold"), relief="flat", pady=6, command=do_invite).pack(side="bottom", fill="x", padx=10)
+    tk.Button(left, text="เชิญเข้าโต๊ะ", bg="#2e9e3a", fg="#ffffff", activebackground="#3cb84a", font=(PF(), 12, "bold"), relief="flat", pady=6, command=do_invite).pack(side="bottom", fill="x", padx=10)
     lbx.bind("<Double-1>", lambda e: do_invite())
     def refresh_online():
         if st["dead"]: return
@@ -1705,19 +1710,19 @@ def poker_window(ip, myname=None):  # หน้าต่างเกมสไต
         else: st["olist"] = rows
         lb_cnt.config(text=f"{len(rows)} เครื่อง (ไม่นับเครื่องนี้)")
         win.after(2000, refresh_online)
-    tk.Label(right, text="แชทในโต๊ะ", bg=PB, fg="#ffe082", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+    tk.Label(right, text="แชทในโต๊ะ", bg=PB, fg="#ffe082", font=(PF(), 13, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
     crow2 = tk.Frame(right, bg=PB); crow2.pack(side="bottom", fill="x", padx=10, pady=10)
-    chat_in = tk.Entry(crow2, font=("Segoe UI", 11), bg="#110a2b", fg="#ffffff", insertbackground="#ffffff", relief="flat")
+    chat_in = tk.Entry(crow2, font=(PF(), 11), bg="#110a2b", fg="#ffffff", insertbackground="#ffffff", relief="flat")
     chat_in.pack(side="left", fill="x", expand=True, ipady=5)
     def chat_send(_e=None):
         t = chat_in.get().strip()
         if t: send({"a": "chat", "m": t[:100]}); chat_in.delete(0, "end")
-    tk.Button(crow2, text="ส่ง", bg="#6a3fd6", fg="#ffffff", relief="flat", font=("Segoe UI", 10, "bold"), command=chat_send).pack(side="right", padx=(6, 0), ipady=2)
+    tk.Button(crow2, text="ส่ง", bg="#6a3fd6", fg="#ffffff", relief="flat", font=(PF(), 10, "bold"), command=chat_send).pack(side="right", padx=(6, 0), ipady=2)
     chat_in.bind("<Return>", chat_send)
-    chat_txt = tk.Text(right, bg="#110a2b", fg="#e8e4ff", font=("Segoe UI", 10), wrap="word", relief="flat", highlightthickness=0, state="disabled", width=10)
+    chat_txt = tk.Text(right, bg="#110a2b", fg="#e8e4ff", font=(PF(), 10), wrap="word", relief="flat", highlightthickness=0, state="disabled", width=10)
     chat_txt.pack(fill="both", expand=True, padx=10)
-    chat_txt.tag_config("nm", foreground="#ffd54f", font=("Segoe UI", 10, "bold")); chat_txt.tag_config("me", foreground="#4dd0e1", font=("Segoe UI", 10, "bold"))
-    chat_txt.tag_config("sys", foreground="#9c95c8", font=("Segoe UI", 9, "italic"))
+    chat_txt.tag_config("nm", foreground="#ffd54f", font=(PF(), 10, "bold")); chat_txt.tag_config("me", foreground="#4dd0e1", font=(PF(), 10, "bold"))
+    chat_txt.tag_config("sys", foreground="#9c95c8", font=(PF(), 9, "italic"))
     def chat_add(who, text, kind="u"):
         t = chat_txt; t.config(state="normal")
         if kind == "sys": t.insert("end", text + "\n", "sys")
@@ -2464,7 +2469,7 @@ def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball �
     try: win.iconbitmap(ICON_PATH)
     except Exception: pass
     KK = {"k": 1.0}
-    F = lambda n, b=False: ("Segoe UI", max(6, round(n * KK["k"])), "bold") if b else ("Segoe UI", max(6, round(n * KK["k"])))
+    F = lambda n, b=False: (PF(), max(6, round(n * KK["k"])), "bold") if b else (PF(), max(6, round(n * KK["k"])))
     W, H, FX, FY, R = 1300, 740, 130, 150, PL_R
     st = {"m": None, "sock": None, "dead": False, "note": "", "balls": {}, "t_snap": time.time(), "items": {}, "ang": 0.0, "pull": 0.0, "pw": 0.0, "drag": False,
           "sx": 0.0, "sy": 0.0, "mx": FX + 250.0, "my": FY + 250.0, "sent": False, "last_aim": 0.0, "lastmsg": "", "me": "", "popt": 0.0}
@@ -2472,6 +2477,7 @@ def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball �
     cv = tk.Canvas(mid, width=W, height=H, bg="#0e1a2b", highlightthickness=0); cv.pack(expand=True)
     K = lambda: KK["k"]
     def rr(x1, y1, x2, y2, r, **kw):
+        if RETRO[0]: return cv.create_polygon([x1, y1, x2, y1, x2, y2, x1, y2], **kw)
         p = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
         return cv.create_polygon(p, smooth=True, splinesteps=10, **kw)
     def fit(tag):
@@ -2684,7 +2690,7 @@ def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball �
         btn("b_inv", sx0, 470, 110, 36, "เชิญเพื่อน", "#2e9e3a", 12)
         btn("b_rul", sx0, 520, 110, 36, "วิธีเล่น", "#546e7a", 12)
         # คำแนะนำ
-        if ph == "aim" and mine(): hint = ("เปิดเกม: " if m["breaking"] else "") + "ชี้เมาส์ไปทางที่จะยิง → ลากแถบ 'แรง' ด้านซ้ายลงแล้วปล่อยเพื่อยิง  •  ล้อเมาส์ = ปรับองศาละเอียด  •  คลิกวงขวา = หมุนลูก"
+        if ph == "aim" and mine(): hint = ("เปิดเกม: " if m["breaking"] else "") + "ชี้เมาส์ไปทางที่จะยิง → ลากแถบ 'แรง' ซ้ายแล้วปล่อย หรือกดค้าง Space แล้วปล่อย  •  ล้อเมาส์ = ปรับละเอียด  •  คลิกวงขวา = หมุนลูก"
         elif ph == "place" and mine(): hint = "ฟาวล์ของอีกฝ่าย: เลื่อนเมาส์ไปที่ที่อยากวางลูกขาว แล้วคลิกยืนยัน"
         elif ph == "over": hint = "จบเกม — กด 'เล่นอีกครั้ง' ที่กลางโต๊ะ"
         elif ph == "roll": hint = "ลูกกำลังกลิ้ง ..."
@@ -2712,8 +2718,8 @@ def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball �
         for ev in o["ev"]:
             nm, vol = ev
             if nm == "cue": pok_snd("cue")
-            elif nm == "clack" and vol > 0.12: pok_snd("clack")
-            elif nm == "rail" and vol > 0.2: pok_snd("rail")
+            elif nm == "clack" and vol > 0.04: pok_snd("clack")
+            elif nm == "rail" and vol > 0.08: pok_snd("rail")
             elif nm == "pocket": pok_snd("pocket")
         if o["msg"] and o["msg"] != st["lastmsg"] and o["phase"] != "over": popup(o["msg"], "#ffe082")
         if o["phase"] == "over" and (prev is None or prev["phase"] != "over"):
@@ -2810,14 +2816,38 @@ def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball �
         draw_hud()
     cv.bind("<Motion>", on_motion); cv.bind("<ButtonPress-1>", on_press); cv.bind("<B1-Motion>", on_motion); cv.bind("<ButtonRelease-1>", on_release)
     cv.bind("<MouseWheel>", on_wheel); cv.bind("<Button-4>", on_wheel); cv.bind("<Button-5>", on_wheel)
+    # Space: กดค้างเพื่อชาร์จแรง ปล่อยเพื่อยิง (ถ้ากำลังลากแถบแรงอยู่ กด Space = ยิงด้วยแรงที่ลากไว้)
+    SP = {"t0": 0.0, "on": False, "rel": None}
+    def can_shoot():
+        m = st["m"]; return bool(m) and m["phase"] == "aim" and mine() and not st["sent"]
+    def fire():
+        SP["rel"] = None
+        if not (SP["on"] or st["drag"]): return
+        SP["on"] = False; st["drag"] = False
+        if can_shoot() and st["pw"] > 0.04:
+            st["sent"] = True; send({"a": "shot", "ang": round(st["ang"], 4), "pw": round(st["pw"], 3), "sx": st["sx"], "sy": st["sy"]})
+        st["pw"] = 0.0; draw_hud()
+    def charge():
+        if st["dead"] or not SP["on"]: return
+        st["pw"] = min(1.0, (time.time() - SP["t0"]) / 1.4); draw_hud(); send_aim(); win.after(40, charge)
+    def sp_down(e):
+        if SP["rel"]:  # คีย์ซ้ำของระบบ (ปล่อย+กดซ้ำทันที) ไม่นับเป็นการปล่อยจริง
+            win.after_cancel(SP["rel"]); SP["rel"] = None; return
+        if st["drag"]: fire(); return
+        if SP["on"] or not can_shoot(): return
+        SP["on"] = True; SP["t0"] = time.time(); charge()
+    def sp_up(e):
+        if SP["on"]: SP["rel"] = win.after(45, fire)
+    win.bind("<KeyPress-space>", sp_down); win.bind("<KeyRelease-space>", sp_up)
+    win.focus_set()
 
     def rules():
         w = tk.Toplevel(win); w.title("วิธีเล่น"); w.configure(bg="#16294a")
-        tk.Label(w, text=POOL_RULES, bg="#16294a", fg="white", font=("Segoe UI", 12), justify="left", wraplength=640, padx=18, pady=14).pack()
+        tk.Label(w, text=POOL_RULES, bg="#16294a", fg="white", font=(PF(), 12), justify="left", wraplength=640, padx=18, pady=14).pack()
     def invite_dialog():
         d = tk.Toplevel(win); d.title("เชิญเพื่อนเล่นพูล"); d.configure(bg="#16294a"); d.resizable(False, False)
-        tk.Label(d, text="เลือกเครื่องที่จะเชิญ (ต้องเป็นรุ่น 9.0.0 ขึ้นไป)", bg="#16294a", fg="white", font=("Segoe UI", 11)).pack(padx=16, pady=(14, 6))
-        lb = tk.Listbox(d, width=34, height=8, font=("Segoe UI", 11), bg="#0b1626", fg="white", selectbackground="#2e7d32", relief="flat", highlightthickness=0, exportselection=False); lb.pack(padx=16)
+        tk.Label(d, text="เลือกเครื่องที่จะเชิญ (ต้องเป็นรุ่น 9.0.0 ขึ้นไป)", bg="#16294a", fg="white", font=(PF(), 11)).pack(padx=16, pady=(14, 6))
+        lb = tk.Listbox(d, width=34, height=8, font=(PF(), 11), bg="#0b1626", fg="white", selectbackground="#2e7d32", relief="flat", highlightthickness=0, exportselection=False); lb.pack(padx=16)
         rows = []; now = time.time()
         with peers_lock:
             for uid, v in peers.items():
@@ -2827,7 +2857,7 @@ def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball �
                 ips = sorted(set(v.get("ips", ())) | ({v["ip"]} if v.get("ip") else set()))
                 rows.append((ips, okv, (v.get("code") or v.get("host") or "?") + ("" if okv else "  (รุ่นเก่า)")))
         for r_ in rows: lb.insert("end", r_[2])
-        msg = tk.Label(d, text="", bg="#16294a", fg="#ffe082", font=("Segoe UI", 10)); msg.pack(pady=4)
+        msg = tk.Label(d, text="", bg="#16294a", fg="#ffe082", font=(PF(), 10)); msg.pack(pady=4)
         def go():
             i = lb.curselection()
             if not i: msg.config(text="คลิกเลือกชื่อก่อน"); return
@@ -2841,7 +2871,7 @@ def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball �
                     if err is None: break
                 root.after(0, lambda: msg.config(text="ส่งคำเชิญแล้ว" if err is None else "ส่งไม่ได้: " + err[:50]))
             threading.Thread(target=work, daemon=True).start()
-        tk.Button(d, text="เชิญ", bg="#2e9e3a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=20, pady=4, command=go).pack(pady=(2, 14))
+        tk.Button(d, text="เชิญ", bg="#2e9e3a", fg="white", font=(PF(), 12, "bold"), relief="flat", padx=20, pady=4, command=go).pack(pady=(2, 14))
 
     # ---------- ลูปเฟรม / ปรับขนาด ----------
     def frame():
@@ -2880,9 +2910,9 @@ def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball �
     threading.Thread(target=reader, daemon=True).start()
     build_bg(); draw_hud(); frame()
 
-POOL_RULES = ("วิธีเล่นพูล 8-ball (ใช้เมาส์อย่างเดียว)\n"
+POOL_RULES = ("วิธีเล่นพูล 8-ball (เมาส์ + Space)\n"
               "1) เลื่อนเมาส์บนโต๊ะ — เส้นเล็งจะชี้ไปทางเมาส์ (ล้อเมาส์ = ปรับองศาละเอียด)\n"
-              "2) เอาเมาส์ไปจับแถบ 'แรง' ด้านซ้าย ลากลงแล้วปล่อยเพื่อยิง ยิ่งลากลงมากยิ่งแรง\n"
+              "2) เอาเมาส์ไปจับแถบ 'แรง' ด้านซ้าย ลากลงแล้วปล่อยเพื่อยิง ยิ่งลากลงมากยิ่งแรง — หรือกดค้างปุ่ม Space (แรงค่อยๆ เพิ่ม) แล้วปล่อยเพื่อยิง\n"
               "3) วงขวา 'หมุนลูก': คลิกจุดบนลูกขาว บน = ลูกตาม ล่าง = ลูกดึง ซ้าย/ขวา = เบี่ยงตอนชนขอบ\n\n"
               "กติกา: หลังเปิดเกม ลูกแรกที่คุณยิงลงจะกำหนดกลุ่ม (เต็ม 1-7 / ครึ่ง 9-15) ลงลูกกลุ่มตัวเองได้ยิงต่อ\n"
               "ต้องตีโดนลูกกลุ่มตัวเองก่อน ถ้าลูกขาวลงหลุม/ไม่โดนลูก/โดนผิดกลุ่ม/ไม่มีลูกชนขอบ = ฟาวล์ อีกฝ่ายวางลูกขาวได้เอง\n"
@@ -3674,7 +3704,7 @@ def viewer_window(sock, ip, remote_w, remote_h, qlabel="", sharp=False, auto=Non
                 if on:
                     if g.get("uac") is None:
                         g["uac"] = tk.Label(canvas, text="ปลายทางกำลังแสดงหน้าต่างขออนุญาต (UAC)\nให้คนหน้าเครื่องกดอนุญาต แล้วภาพจะกลับมาเอง",
-                                            bg="#10192b", fg="#ffd166", font=("Segoe UI", 16, "bold"), padx=24, pady=16, justify="center")
+                                            bg="#10192b", fg="#ffd166", font=(PF(), 16, "bold"), padx=24, pady=16, justify="center")
                     g["uac"].place(relx=0.5, rely=0.5, anchor="center"); g["uac"].lift()
                 elif g.get("uac") is not None:
                     g["uac"].place_forget()
@@ -4026,11 +4056,17 @@ def main():
                   "#1b7f3b": "#b3122b", "#146030": "#7d0c1e", "#20314f": "#6b1f1f"}
     DARK2LIGHT = {v: k for k, v in LIGHT2DARK.items()}
     assert len(DARK2LIGHT) == len(LIGHT2DARK)
+    RETRO_PAL = {BG: "#12102b", PANEL: "#1d1a45", PANEL2: "#2b2766", ACCENT: "#ffd400", ACCENT2: "#ff3b6b", TEXT: "#f2f2ff", SUBTEXT: "#9fa6ff",
+                 OK_C: "#3dff8a", DUP_C: "#ff5a5a", "#223354": "#3a3480", "#2a3c5e": "#473fa0", "#2c3e5c": "#0b0a1f",
+                 "#1b7f3b": "#0fa843", "#146030": "#0a7a30", "#20314f": "#4c43b8"}
+    assert set(RETRO_PAL) == set(LIGHT2DARK) and len(set(RETRO_PAL.values())) == len(RETRO_PAL)
+    RETRO2LIGHT = {v: k for k, v in RETRO_PAL.items()}
+    def cmap(): return LIGHT2DARK if ADMIN[0] else RETRO_PAL if RETRO[0] else {}
     style = ttk.Style(root)
     style.theme_use("clam")
     root.option_add("*TCombobox*Listbox.font", FNT(13))
     def apply_styles(dark=False):  # ตั้งสไตล์ ttk ใหม่ทั้งชุดจากค่าตรงๆ (ไม่อ่านค่าเก่ากลับมา)
-        c = (lambda x: LIGHT2DARK.get(x, x)) if dark else (lambda x: x)
+        c = lambda x: cmap().get(x, x)
         style.configure(".", background=c(BG), foreground=c(TEXT), fieldbackground=c(PANEL2), font=FNT(13))
         style.configure("TFrame", background=c(BG))
         style.configure("Panel.TFrame", background=c(PANEL))
@@ -4047,13 +4083,18 @@ def main():
         style.configure("Ghost.TButton", background=c(PANEL2), foreground=c(TEXT), font=FNT(12), padding=14, borderwidth=0)
         style.configure("Vertical.TScrollbar", arrowsize=S(28))
         style.map("Ghost.TButton", background=[("active", c("#20314f"))])
+        if RETRO[0] and not ADMIN[0]:  # ปุ่มนูนขอบดำหนา แบบเครื่องเกมเก่า + ตัวอักษรเข้มบนปุ่มเหลือง
+            for nm, lt, dk in (("Go.TButton", "#7dffa8", "#056b25"), ("Accent.TButton", "#fff29a", "#a98600"), ("Ghost.TButton", "#7a72e8", "#161240")):
+                style.configure(nm, borderwidth=3, relief="raised", bordercolor="#000000", lightcolor=lt, darkcolor=dk)
+            style.configure("Accent.TButton", foreground="#12102b")
+            style.configure("Treeview.Heading", borderwidth=2, relief="raised", bordercolor="#000000")
         style.configure("Treeview", background=c(PANEL2), fieldbackground=c(PANEL2), foreground=c(TEXT), rowheight=int(S(46) * SCALE[0]), borderwidth=0, font=FNT(12))
         style.configure("Treeview.Heading", background=c(PANEL), foreground=c(ACCENT), font=FNT(12, "bold"), borderwidth=0)
         style.map("Treeview", background=[("selected", c(ACCENT2))], foreground=[("selected", "#ffffff")])
     apply_styles(False)
 
     def popup(title):  # ป็อปอัปกลางหน้าต่างหลัก (ไม่สร้างหน้าต่างแยก) คืน (พื้นหลัง, กล่อง, ฟังก์ชันแปลงสี)
-        c = (lambda x: LIGHT2DARK.get(x, x)) if ADMIN[0] else (lambda x: x)
+        c = lambda x: cmap().get(x, x)
         dim = tk.Frame(root, bg=c("#2c3e5c"))
         dim.place(x=0, y=0, relwidth=1, relheight=1)
         w = tk.Frame(dim, bg=c(PANEL), highlightbackground=c(ACCENT), highlightthickness=4)
@@ -4233,6 +4274,7 @@ def main():
         ttk.Button(row, text="เชื่อมต่อ", style="Accent.TButton", command=ok).pack(side="right")
         ttk.Button(row, text="ยกเลิก", style="Ghost.TButton", command=w.destroy).pack(side="right", padx=8)
         if ADMIN[0]: recolor_widget(w)
+        elif RETRO[0]: recolor_widget(w, RETRO_PAL)
         w.transient(root); w.grab_set()
 
     def ask_link(err):
@@ -4375,6 +4417,10 @@ def main():
         else:
             commit(False)
     tk.Checkbutton(sec_srv, text="ให้ผู้คุมกด UAC / ใช้หน้าจอล็อกได้ (ส่วน SYSTEM ปิดไว้เป็นค่าเริ่มต้น)", variable=sys_var, command=toggle_sys,
+                   bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT, font=FNT(13),
+                   anchor="w", justify="left", wraplength=S(520)).pack(fill="x", padx=16, pady=(0, 6))
+    retro_var = tk.BooleanVar(value=bool(cfg.get("retro", False)))
+    tk.Checkbutton(sec_srv, text="ธีม Retro 8-bit (หน้าตาแบบเกมเก่า: ทั้งหน้าหลัก ป๊อก และพูล)", variable=retro_var, command=lambda: toggle_retro(),
                    bg=PANEL, fg=TEXT, selectcolor=PANEL2, activebackground=PANEL, activeforeground=TEXT, font=FNT(13),
                    anchor="w", justify="left", wraplength=S(520)).pack(fill="x", padx=16, pady=(0, 6))
     def rollback():
@@ -4651,8 +4697,8 @@ def main():
     FG_OPTS = ("fg", "foreground", "activeforeground", "insertbackground")
     admin_only = {}
 
-    def recolor_widget(w):
-        m = LIGHT2DARK if ADMIN[0] else DARK2LIGHT
+    def recolor_widget(w, m=None):
+        if m is None: m = LIGHT2DARK if ADMIN[0] else DARK2LIGHT
         for opt in BG_OPTS + FG_OPTS:
             try: cur = str(w.cget(opt)).lower()
             except Exception: continue
@@ -4662,13 +4708,13 @@ def main():
                 try: w.config(**{opt: n})
                 except Exception: pass
         for c in w.winfo_children():
-            recolor_widget(c)
+            recolor_widget(c, m)
 
     def recolor_misc():  # แท็กสีในตาราง + ธีมพื้นฐานของกล่องมาตรฐาน (simpledialog)
-        d = ADMIN[0]
-        tree.tag_configure("ok", foreground=LIGHT2DARK[OK_C] if d else OK_C)
-        tree.tag_configure("me", foreground="#ff6b81" if d else ACCENT)
-        tree.tag_configure("dup", foreground="#ff9f43" if d else "#b36200")
+        d = ADMIN[0]; r_ = RETRO[0] and not d
+        tree.tag_configure("ok", foreground=LIGHT2DARK[OK_C] if d else RETRO_PAL[OK_C] if r_ else OK_C)
+        tree.tag_configure("me", foreground="#ff6b81" if d else RETRO_PAL[ACCENT] if r_ else ACCENT)
+        tree.tag_configure("dup", foreground="#ff9f43" if d else "#ffb347" if r_ else "#b36200")
         dflt = {"Toplevel.background": "SystemButtonFace", "Frame.background": "SystemButtonFace",
                 "Label.background": "SystemButtonFace", "Label.foreground": "SystemButtonText",
                 "Entry.background": "SystemWindow", "Entry.foreground": "SystemWindowText",
@@ -4677,10 +4723,38 @@ def main():
         dark = {"Toplevel.background": "#260808", "Frame.background": "#260808", "Label.background": "#260808",
                 "Label.foreground": "#f5d9d9", "Entry.background": "#3a0d0d", "Entry.foreground": "#f5d9d9",
                 "Entry.insertBackground": "#f5d9d9", "Button.background": "#3a0d0d", "Button.foreground": "#f5d9d9"}
-        for k, v in (dark if d else dflt).items():
+        retro = {"Toplevel.background": RETRO_PAL[PANEL], "Frame.background": RETRO_PAL[PANEL], "Label.background": RETRO_PAL[PANEL],
+                 "Label.foreground": RETRO_PAL[TEXT], "Entry.background": RETRO_PAL[PANEL2], "Entry.foreground": RETRO_PAL[TEXT],
+                 "Entry.insertBackground": RETRO_PAL[TEXT], "Button.background": RETRO_PAL[PANEL2], "Button.foreground": RETRO_PAL[TEXT]}
+        for k, v in (dark if d else retro if r_ else dflt).items():
             root.option_add("*" + k, v, 80)
 
+    FONT_ORIG = [FONT[0]]
+    def set_retro(on, quiet=False):  # ธีม Retro 8-bit: จานสีเครื่องเกม ปุ่มนูนขอบดำ ฟอนต์ตัวหนาแบบจอเก่า (ใช้ฟอนต์ที่มีในเครื่อง)
+        if on == RETRO[0] or ADMIN[0]: return
+        mp = RETRO_PAL if on else RETRO2LIGHT
+        errs = []
+        def step(fn):
+            try: fn()
+            except Exception as e: errs.append(str(e)); log_err(f"set_retro {e}")
+        RETRO[0] = on
+        FONT[0] = "Courier New" if on else FONT_ORIG[0]
+        def fonts():
+            for ft in _FONTS.values(): ft.configure(family=FONT[0])
+        step(fonts)
+        step(lambda: apply_styles(False))
+        step(lambda: recolor_widget(root, mp))
+        step(recolor_misc)
+        step(update_cols)
+        if errs and not quiet: notify("ธีม Retro มีข้อผิดพลาด: " + errs[0][:80], True)
+    def toggle_retro():
+        want = retro_var.get(); cfg["retro"] = want; save_config(cfg)
+        if ADMIN[0]: notify("จะใช้ธีม Retro หลังปิดโหมดแอดมิน"); return
+        set_retro(want)
+        notify("เปิดธีม Retro 8-bit แล้ว (หน้าต่างเกมที่เปิดใหม่จะเป็นธีมนี้ด้วย)" if want else "กลับธีมเดิมแล้ว")
     def toggle_admin():  # แต่ละขั้นแยก try: ขั้นไหนพัง ปุ่มกับขั้นอื่นยังทำงาน และแจ้งข้อผิดพลาดบนหน้าจอ
+        was_retro = RETRO[0]
+        if was_retro: set_retro(False, True)  # ธีมแอดมินแดงดำใช้แทนชั่วคราว ปิดแอดมินแล้วค่อยกลับธีม Retro
         ADMIN[0] = not ADMIN[0]
         errs = []
         def step(fn):
@@ -4695,6 +4769,7 @@ def main():
         step(lambda: recolor_widget(root))
         step(recolor_misc)
         step(refresh_active_label)
+        if was_retro and not ADMIN[0]: set_retro(True, True)
         threading.Thread(target=send_presence, daemon=True).start()
         if ADMIN[0] and not cfg.get("username"): root.after(200, set_admin_name)
         if errs: notify("โหมดแอดมินมีข้อผิดพลาด: " + " | ".join(errs[:2]), True)
@@ -4709,7 +4784,7 @@ def main():
             _godbuf[0] = ""
             toggle_admin()
     root.bind_all("<Key>", on_any_key, add="+")
-    root.bind_class("Toplevel", "<Map>", lambda e: recolor_widget(e.widget) if ADMIN[0] else None, add="+")
+    root.bind_class("Toplevel", "<Map>", lambda e: recolor_widget(e.widget) if ADMIN[0] else recolor_widget(e.widget, RETRO_PAL) if RETRO[0] else None, add="+")
 
     def set_admin_name():  # กล่องธีมเอง (ไม่ใช้ simpledialog ของ Windows ที่เป็นสีขาวตายตัว ขัดธีมแดงดำ)
         pc, pc2 = LIGHT2DARK[PANEL], LIGHT2DARK[PANEL2]
@@ -5096,6 +5171,7 @@ def main():
         root.withdraw()
         tray_icon.notify("ทำงานอยู่พื้นหลัง ดับเบิลคลิกไอคอนเพื่อเปิด", "ZAIA Remote Desktop")
     root.protocol("WM_DELETE_WINDOW", on_close)
+    if cfg.get("retro"): set_retro(True, True)
 
     if not (cfg.get("role") and cfg.get("unit")):
         root.deiconify()
