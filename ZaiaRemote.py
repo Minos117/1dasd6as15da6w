@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "8.1.0"
+APP_VER = "9.0.0"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -870,7 +870,7 @@ def handle_message_client(client, ip):
 
 def send_presence():
     # โหมดแอดมิน (god mode): ไม่โชว์ชื่อเครื่อง/IP/รุ่นให้เครื่องอื่นเห็น เหลือแค่ชื่อผู้ใช้ -- เครื่องเราเองยังเห็นตัวเองปกติเสมอ (ไม่ผ่านบรรทัดนี้)
-    msg = f"{HOSTNAME}|{username()}|{APP_VER}|{MY_ID}|{'S' if ADMIN[0] else ''}|{'P' if POK_ACTIVE[0] > 0 else ''}".encode("utf-8")
+    msg = f"{HOSTNAME}|{username()}|{APP_VER}|{MY_ID}|{'S' if ADMIN[0] else ''}|{'P' if POK_ACTIVE[0] > 0 else 'L' if POOL_ACTIVE[0] > 0 else ''}".encode("utf-8")
     try:
         ips = socket.gethostbyname_ex(HOSTNAME)[2]
     except Exception:
@@ -938,12 +938,12 @@ def listener():
             ver = f[2] if len(f) > 2 else "เก่า"
             uid = f[3] if len(f) > 3 else host
             stealth = len(f) > 4 and f[4] == "S"
-            playing = len(f) > 5 and f[5] == "P"  # กำลังเล่น Play poker (8.0.0+; รุ่นเก่าอ่านช่องนี้ไม่เป็นก็ไม่เป็นไร)
+            playing = len(f) > 5 and f[5] in ("P", "L")  # กำลังเล่น Play poker (8.0.0+; รุ่นเก่าอ่านช่องนี้ไม่เป็นก็ไม่เป็นไร)
             if uid == MY_ID:
                 continue
             with peers_lock:
                 p = peers.setdefault(uid, {"ips": set()})
-                p.update(host=host, code=code, ver=ver, last=time.time(), ip=addr[0], stealth=stealth, poker=playing)
+                p.update(host=host, code=code, ver=ver, last=time.time(), ip=addr[0], stealth=stealth, poker=playing and f[5] == "P", pool=playing and f[5] == "L")
                 p["ips"].add(addr[0])
         except Exception as e:
             log_err(e)
@@ -1074,6 +1074,9 @@ def control_server():
                 continue
             if hello == b"G":  # เกมป๊อกเด้ง (5.0.0+) ไม่เห็นจอ ไม่คุมเครื่อง จึงไม่ต้องขออนุญาต
                 threading.Thread(target=poker_serve, args=(client, addr), daemon=True).start()
+                continue
+            if hello == b"Q":  # เกมพูล 8-ball (9.0.0+) ไม่เห็นจอ ไม่คุมเครื่อง จึงไม่ต้องขออนุญาต
+                threading.Thread(target=pool_serve, args=(client, addr), daemon=True).start()
                 continue
             if hello == b"I":  # ชวนเล่นป๊อกเด้ง (8.0.0+) แค่เด้งหน้าต่างถาม ไม่เห็นจอ ไม่คุมเครื่อง
                 threading.Thread(target=poker_invite_recv, args=(client, addr), daemon=True).start()
@@ -1418,38 +1421,38 @@ def poker_invite_recv(client, addr):  # รับคำเชิญ: {"n": ช�
         if now - POK_INV.get(addr[0], 0) < 20: return
         POK_INV[addr[0]] = now
         r = ROOT[0]
-        if r is not None: r.after(0, poker_show_invite, who, tip)
+        if r is not None: r.after(0, poker_show_invite, who, tip, "pool" if o.get("g") == "pool" else "poker")
     except Exception as e:
         log_err(e)
     finally:
         try: client.close()
         except Exception: pass
 
-def poker_invite_send(ip, name, host_ip):  # คืน None = ส่งแล้ว, ข้อความ = ผิดพลาด
+def poker_invite_send(ip, name, host_ip, game="poker"):  # คืน None = ส่งแล้ว, ข้อความ = ผิดพลาด
     try:
-        pb = json.dumps({"n": name, "ip": host_ip}, ensure_ascii=False).encode("utf-8")
+        pb = json.dumps({"n": name, "ip": host_ip, "g": game}, ensure_ascii=False).encode("utf-8")
         c = socket.create_connection((ip, CTRL_PORT), timeout=4)
         c.sendall(b"I" + len(pb).to_bytes(2, "little") + pb); c.close()
         return None
     except Exception as e:
         return str(e)
 
-def poker_show_invite(who, ip):  # หน้าต่างถามว่าจะเข้าร่วมไหม (ปิดเองใน 60 วินาที)
+def poker_show_invite(who, ip, game="poker"):  # หน้าต่างถามว่าจะเข้าร่วมไหม (ปิดเองใน 60 วินาที)
     root = ROOT[0]
     if root is None: return
-    d = tk.Toplevel(root); d.title("ชวนเล่นป๊อกเด้ง"); d.configure(bg="#2a1a5e"); d.resizable(False, False)
+    d = tk.Toplevel(root); d.title("ชวนเล่นเกม"); d.configure(bg="#2a1a5e"); d.resizable(False, False)
     try: d.attributes("-topmost", True)
     except Exception: pass
-    tk.Label(d, text=f"{who} ชวนคุณเล่นป๊อกเด้ง", bg="#2a1a5e", fg="#ffe082", font=("Segoe UI", 14, "bold")).pack(padx=28, pady=(18, 4))
-    tk.Label(d, text="เหรียญเสมือน เล่นเอาสนุก", bg="#2a1a5e", fg="white", font=("Segoe UI", 11)).pack(padx=28)
+    tk.Label(d, text=f"{who} ชวนคุณเล่น" + ("พูล 8-ball" if game == "pool" else "ป๊อกเด้ง"), bg="#2a1a5e", fg="#ffe082", font=("Segoe UI", 14, "bold")).pack(padx=28, pady=(18, 4))
+    tk.Label(d, text="เล่นเอาสนุก ไม่มีเงินจริง", bg="#2a1a5e", fg="white", font=("Segoe UI", 11)).pack(padx=28)
     row = tk.Frame(d, bg="#2a1a5e"); row.pack(pady=16)
-    def yes(): d.destroy(); poker_start(ip)
+    def yes(): d.destroy(); poker_start(ip, False, game)
     tk.Button(row, text="เข้าร่วม", bg="#2e9e3a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=18, pady=4, command=yes).pack(side="left", padx=8)
     tk.Button(row, text="ไม่เล่น", bg="#546e7a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=18, pady=4, command=d.destroy).pack(side="left", padx=8)
     d.after(60000, lambda: d.winfo_exists() and d.destroy())
     pok_snd("invite")
 
-def poker_start(ip, host=False):  # ถามชื่อก่อนเข้าโต๊ะทุกครั้ง (เติมชื่อเดิมให้) แล้วค่อยเปิดหน้าต่างเกม host=True คือเปิดโต๊ะที่เครื่องนี้
+def poker_start(ip, host=False, game="poker"):  # ถามชื่อก่อนเข้าโต๊ะทุกครั้ง (เติมชื่อเดิมให้) แล้วค่อยเปิดหน้าต่างเกม host=True คือเปิดโต๊ะที่เครื่องนี้
     root = ROOT[0]
     if root is None: return
     d = tk.Toplevel(root); d.title("ชื่อผู้เล่น"); d.configure(bg="#2a1a5e"); d.resizable(False, False)
@@ -1464,8 +1467,12 @@ def poker_start(ip, host=False):  # ถามชื่อก่อนเข้�
         try: save_config(cfg)
         except Exception as ex: log_err(ex)
         d.destroy()
-        if host: poker_open_table()
-        poker_window(ip, nm)
+        if game == "pool":
+            if host: pool_open_table()
+            pool_window(ip, nm)
+        else:
+            if host: poker_open_table()
+            poker_window(ip, nm)
     row = tk.Frame(d, bg="#2a1a5e"); row.pack(pady=(8, 18))
     tk.Button(row, text="เข้าโต๊ะ", bg="#2e9e3a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=18, pady=4, command=ok).pack(side="left", padx=8)
     tk.Button(row, text="ยกเลิก", bg="#546e7a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=18, pady=4, command=d.destroy).pack(side="left", padx=8)
@@ -1480,7 +1487,7 @@ POK_SND = {  # เสียง 8-bit: (ความถี่ Hz, มิลลิ
     "deal": [(1200, 22), (900, 25)], "flip": [(660, 25), (990, 40)], "bet": [(1320, 40), (1760, 70)],
     "turn": [(988, 90), (0, 20), (1318, 150)], "hit": [(440, 40), (660, 70)], "stand": [(330, 90)],
     "win": [(523, 90), (659, 90), (784, 90), (1047, 260)], "lose": [(392, 160), (330, 160), (262, 340)],
-    "tie": [(440, 110), (0, 30), (440, 110)], "chat": [(1568, 35), (2093, 55)], "invite": [(880, 80), (1175, 80), (1568, 80), (0, 30), (1568, 160)]}
+    "tie": [(440, 110), (0, 30), (440, 110)], "chat": [(1568, 35), (2093, 55)], "cue": [(160, 28), (1400, 14)], "clack": [(2200, 10), (1500, 16)], "rail": [(300, 22), (200, 26)], "pocket": [(700, 30), (450, 40), (240, 70)], "invite": [(880, 80), (1175, 80), (1568, 80), (0, 30), (1568, 160)]}
 
 def pok_wav(name, path):  # สร้างไฟล์เสียง WAV 8 บิตจากคลื่นสี่เหลี่ยม (เสียงแบบเกมเก่า)
     import wave
@@ -1493,16 +1500,28 @@ def pok_wav(name, path):  # สร้างไฟล์เสียง WAV 8 บ
     with wave.open(path, "wb") as w:
         w.setnchannels(1); w.setsampwidth(1); w.setframerate(rate); w.writeframes(bytes(buf))
 
-def pok_snd(name):  # เล่นเสียงเกม (ปิดได้ด้วยปุ่มเสียงในหน้าต่างเกม) ไม่มีเสียง/พัง = ข้ามเงียบๆ
-    if cfg.get("poker_mute"): return
+POK_SQ = queue.Queue()
+POK_SW = {"on": False}
+def _pok_worker():  # เล่นเสียงทีละอัน ต่อคิว (เดิมเล่นแบบ async ซ้อนกัน เสียงใหม่ตัดเสียงเก่า = ขาดๆ หายๆ)
     try:
         import winsound
         d = os.path.join(APPDIR, "poker_snd"); os.makedirs(d, exist_ok=True)
-        p = os.path.join(d, name + ".wav")
-        if not os.path.exists(p): pok_wav(name, p)
-        winsound.PlaySound(p, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
-    except Exception:
-        pass
+        for n in POK_SND:
+            p = os.path.join(d, n + ".wav")
+            if not os.path.exists(p): pok_wav(n, p)
+    except Exception as e:
+        log_err(e); POK_SW["on"] = False; return
+    while True:
+        name = POK_SQ.get()
+        try: winsound.PlaySound(os.path.join(d, name + ".wav"), winsound.SND_FILENAME | winsound.SND_NODEFAULT)
+        except Exception: pass
+
+def pok_snd(name):  # เล่นเสียงเกม (ปิดได้ด้วยปุ่มเสียงในหน้าต่างเกม) ไม่มีเสียง/พัง = ข้ามเงียบๆ
+    if cfg.get("poker_mute") or name not in POK_SND: return
+    if not POK_SW["on"]:
+        POK_SW["on"] = True; threading.Thread(target=_pok_worker, daemon=True).start()
+    if name in ("deal", "flip", "chat", "clack", "rail") and POK_SQ.qsize() >= 3: return  # เสียงเล็กๆ ที่ซ้อนกันเยอะ = ทิ้ง กันเสียงเลื่อนช้ากว่าภาพ (ชนะ/แพ้/ตาคุณ ไม่ทิ้ง)
+    POK_SQ.put(name)
 
 FELT, FELT2 = "#0b6b3f", "#0e7a4d"
 POK_RULES = ("วิธีเล่นสั้นๆ: 1) เลือกชิปเพิ่มเดิมพัน 2) กด 'ลงเดิมพัน' (ไม่เล่นรอบนี้กด 'ข้ามรอบ') 3) รอแจกไพ่ 4) ถึงตาคุณกด 'จั่ว' (ขอเพิ่ม 1 ใบ) หรือ 'อยู่' (พอแล้ว) 5) ดูผล แล้วรอบใหม่เริ่มเอง\n\n"
@@ -2089,6 +2108,787 @@ def poker_window(ip, myname=None):  # หน้าต่างเกมสไต
     POK_ACTIVE[0] += 1
     render(); tickui(); dealer_tick(); refresh_online()
     chat_add("", "แชทกับคนในโต๊ะได้ที่ช่องด้านล่าง", "sys")
+
+import math
+# ---------- Play pool: 8-ball (9.0.0) เล่นกับบอทหรือเพื่อน 1 คน เหรียญ/เงินไม่เกี่ยว ----------
+POOL = {"table": None}
+POOL_ACTIVE = [0]
+PL_W, PL_H, PL_R, PL_DT = 1000.0, 500.0, 11.0, 1.0 / 240
+PL_POCKETS = ((0.0, 0.0, 25.0), (PL_W, 0.0, 25.0), (0.0, PL_H, 25.0), (PL_W, PL_H, 25.0), (PL_W / 2, -6.0, 23.0), (PL_W / 2, PL_H + 6.0, 23.0))
+PL_T_TURN = 40
+PL_HEAD = (PL_W * 0.25, PL_H / 2)
+
+def pl_kind(n): return None if n in (0, 8) else ("solid" if n < 8 else "stripe")
+
+def pl_seg_dist(px, py, ax, ay, bx, by):  # ระยะจุด P ถึงเส้น AB (ช่วง)
+    dx, dy = bx - ax, by - ay
+    d2 = dx * dx + dy * dy
+    t = 0.0 if d2 == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / d2))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+class PoolTable:
+    def __init__(s):
+        s.lock = threading.RLock()
+        s.closed = False
+        s.seats = [None, None]  # {"name","send","ip"} ; None = บอท (ที่นั่ง 0 คือเจ้าของโต๊ะ)
+        s.names = ["", "บอท"]
+        s.breaker = 1  # reset จะสลับเป็น 0
+        s.dirty = True
+        s.reset("พร้อมแล้ว")
+        threading.Thread(target=s.loop, daemon=True).start()
+    # ---- ตั้งโต๊ะ ----
+    def reset(s, msg=""):
+        s.breaker = 1 - s.breaker
+        cy = PL_H / 2
+        fx, dx, dy = PL_W * 0.72, 1.7320508 * PL_R + 0.3, 2 * PL_R + 0.3
+        pos = [(fx + r * dx, cy + (i - r / 2) * dy) for r in range(5) for i in range(r + 1)]
+        solids = list(range(1, 8)); stripes = list(range(9, 16)); random.shuffle(solids); random.shuffle(stripes)
+        corner_a, corner_b = solids.pop(), stripes.pop()
+        rest = solids + stripes; random.shuffle(rest)
+        order = [None] * 15
+        order[4], order[10], order[14] = 8, corner_a, corner_b
+        for i in range(15):
+            if order[i] is None: order[i] = rest.pop()
+        s.b = {0: {"n": 0, "x": PL_HEAD[0], "y": cy, "vx": 0.0, "vy": 0.0, "on": True}}
+        for n, (x, y) in zip(order, pos): s.b[n] = {"n": n, "x": x, "y": y, "vx": 0.0, "vy": 0.0, "on": True}
+        s.phase, s.turn, s.groups, s.pocketed, s.breaking, s.winner = "aim", s.breaker, [None, None], [], True, None
+        s.shot, s.aim, s.ev, s.acc, s.last = None, [0.0, 0.0], [], 0.0, time.time()
+        s.msg = msg or f"{s.names[s.turn] or 'เจ้าของโต๊ะ'} เปิดเกม"
+        s.start_turn(); s.dirty = True
+    def start_turn(s):
+        now = time.time()
+        s.turn_at = now + PL_T_TURN
+        s.bot_at, s.bot_plan = (now + random.uniform(1.2, 2.0), None) if s.seats[s.turn] is None else (0.0, None)
+        s.aim = [0.0, 0.0]
+    def is_bot(s, seat): return s.seats[seat] is None
+    # ---- ผู้เล่นเข้า/ออก ----
+    def join(s, name, send, owner, ip):
+        with s.lock:
+            if owner:
+                if s.seats[0] is not None: return None
+                seat = 0
+            else:
+                if s.seats[1] is not None or s.seats[0] is None: return None
+                seat = 1
+            s.seats[seat] = {"name": name, "send": send, "ip": ip}; s.names[seat] = name
+            if seat == 1:
+                s.breaker = 1; s.reset(f"{name} เข้าร่วม — เริ่มเกมใหม่")
+            elif seat == 0: s.names[0] = name; s.msg = f"{name} เปิดโต๊ะ"; s.start_turn(); s.dirty = True
+            s.dirty = True
+            return seat
+    def leave(s, seat):
+        with s.lock:
+            if seat == 0:
+                s.closed = True
+                for q in s.seats[1:]:
+                    if q:
+                        try: q["send"]({"t": "closed"})
+                        except Exception: pass
+                return
+            s.seats[1] = None; s.names[1] = "บอท"
+            s.msg = "เพื่อนออกจากโต๊ะ — บอทเล่นแทน"
+            if s.turn == 1 and s.phase in ("aim", "place"): s.start_turn()
+            s.dirty = True
+    # ---- คำสั่งจากผู้เล่น ----
+    def act(s, seat, a):
+        with s.lock:
+            k = a.get("a")
+            try:
+                if k == "aim" and seat == s.turn and s.phase == "aim":
+                    s.aim = [float(a.get("ang", 0)) % (2 * math.pi), max(0.0, min(1.0, float(a.get("pull", 0))))]
+                elif k == "shot" and seat == s.turn and s.phase == "aim":
+                    s.shoot(float(a["ang"]), max(0.0, min(1.0, float(a["pw"]))), max(-1.0, min(1.0, float(a.get("sx", 0)))), max(-1.0, min(1.0, float(a.get("sy", 0)))))
+                elif k == "place" and seat == s.turn and s.phase == "place":
+                    s.place(float(a["x"]), float(a["y"]))
+                elif k == "rematch" and s.phase == "over": s.reset("เริ่มเกมใหม่")
+            except (KeyError, ValueError, TypeError): pass
+    def valid_spot(s, x, y):
+        if not (PL_R <= x <= PL_W - PL_R and PL_R <= y <= PL_H - PL_R): return False
+        return all(b["n"] == 0 or not b["on"] or math.hypot(b["x"] - x, b["y"] - y) >= 2 * PL_R + 0.5 for b in s.b.values())
+    def place(s, x, y):
+        if not s.valid_spot(x, y): return False
+        c = s.b[0]; c.update(x=x, y=y, vx=0.0, vy=0.0, on=True)
+        s.phase = "aim"; s.msg = ""; s.turn_at = time.time() + PL_T_TURN; s.dirty = True
+        if s.is_bot(s.turn): s.bot_at, s.bot_plan = time.time() + 0.9, None
+        return True
+    def shoot(s, ang, pw, sx, sy):
+        c = s.b[0]; sp = 120 + pw * 2100
+        c["vx"], c["vy"] = math.cos(ang) * sp, math.sin(ang) * sp
+        s.shot = {"first": None, "pk": [], "rail": False, "sx": sx, "sy": sy, "cue_in": False}
+        s.phase, s.msg = "roll", ""; s.ev.append(["cue", round(pw, 2)]); s.dirty = True
+    # ---- ฟิสิกส์ (1 ก้าว = 1/240 วินาที) ----
+    def step(s):
+        R, live = PL_R, [b for b in s.b.values() if b["on"]]
+        sh = s.shot
+        for b in live:
+            vx, vy = b["vx"], b["vy"]
+            if vx == 0.0 and vy == 0.0: continue
+            b["x"] += vx * PL_DT; b["y"] += vy * PL_DT
+            sp = math.hypot(vx, vy)
+            ns = sp * (1 - 0.45 * PL_DT) - 25 * PL_DT
+            if ns < 6: b["vx"] = b["vy"] = 0.0
+            else: k = ns / sp; b["vx"], b["vy"] = vx * k, vy * k
+            x, y = b["x"], b["y"]
+            for px, py, pr in PL_POCKETS:
+                if (x - px) ** 2 + (y - py) ** 2 < pr * pr:
+                    b["on"] = False; b["vx"] = b["vy"] = 0.0
+                    s.ev.append(["pocket", 1.0])
+                    if sh is not None:
+                        sh["pk"].append(b["n"])
+                        if b["n"] == 0: sh["cue_in"] = True
+                    break
+            if not b["on"]: continue
+            hit, vn = None, 0.0
+            if x < R: b["x"] = R; b["vx"] = -b["vx"] * 0.78; hit, vn = "x", abs(vx)
+            elif x > PL_W - R: b["x"] = PL_W - R; b["vx"] = -b["vx"] * 0.78; hit, vn = "x", abs(vx)
+            if y < R: b["y"] = R; b["vy"] = -b["vy"] * 0.78; hit, vn = "y", abs(vy)
+            elif y > PL_H - R: b["y"] = PL_H - R; b["vy"] = -b["vy"] * 0.78; hit, vn = "y", abs(vy)
+            if hit:
+                s.ev.append(["rail", min(1.0, vn / 1200)])
+                if sh is not None:
+                    if sh["first"] is not None: sh["rail"] = True
+                    if b["n"] == 0 and sh["sx"]:  # หมุนข้างของลูกขาว เบี่ยงตอนชนขอบ
+                        t = sh["sx"] * 0.22 * vn
+                        if hit == "x": b["vy"] += t * (1 if b["vx"] > 0 else -1)
+                        else: b["vx"] -= t * (1 if b["vy"] > 0 else -1)
+                        sh["sx"] = 0
+        live = [b for b in live if b["on"]]
+        n = len(live)
+        for i in range(n):
+            b1 = live[i]
+            for j in range(i + 1, n):
+                b2 = live[j]
+                dx, dy = b2["x"] - b1["x"], b2["y"] - b1["y"]
+                if dx > 2 * R or dx < -2 * R or dy > 2 * R or dy < -2 * R: continue
+                d2 = dx * dx + dy * dy
+                if d2 >= 4 * R * R or d2 == 0: continue
+                if b1["vx"] == b1["vy"] == b2["vx"] == b2["vy"] == 0.0: continue
+                d = math.sqrt(d2); nx, ny = dx / d, dy / d
+                ov = (2 * R - d) / 2
+                b1["x"] -= nx * ov; b1["y"] -= ny * ov; b2["x"] += nx * ov; b2["y"] += ny * ov
+                rvn = (b1["vx"] - b2["vx"]) * nx + (b1["vy"] - b2["vy"]) * ny
+                if rvn <= 0: continue
+                j_ = (1 + 0.95) * rvn / 2
+                b1["vx"] -= j_ * nx; b1["vy"] -= j_ * ny; b2["vx"] += j_ * nx; b2["vy"] += j_ * ny
+                s.ev.append(["clack", min(1.0, rvn / 1000)])
+                if sh is not None and (b1["n"] == 0 or b2["n"] == 0):
+                    cue, obj, sgn = (b1, b2, 1) if b1["n"] == 0 else (b2, b1, -1)
+                    if sh["first"] is None:
+                        sh["first"] = obj["n"]
+                        if sh["sy"]:  # ลูกตาม/ลูกดึง: เพิ่ม/ลดความเร็วลูกขาวตามแนวชน
+                            cue["vx"] += sgn * nx * sh["sy"] * 0.5 * rvn; cue["vy"] += sgn * ny * sh["sy"] * 0.5 * rvn
+                        sh["sy"] = 0
+    def moving(s): return any(b["on"] and (b["vx"] or b["vy"]) for b in s.b.values())
+    def remaining(s, kind): return [n for n, b in s.b.items() if b["on"] and pl_kind(n) == kind]
+    # ---- ตัดสินหลังลูกหยุด ----
+    def resolve(s):
+        sh, me = s.shot, s.turn; opp = 1 - me
+        s.shot = None
+        pk = sh["pk"]; foul, why = False, ""
+        if sh["cue_in"]: foul, why = True, "ลูกขาวลงหลุม"
+        elif sh["first"] is None: foul, why = True, "ยิงไม่โดนลูกไหนเลย"
+        elif not s.breaking:
+            g = s.groups[me]
+            want = (g if s.remaining(g) else 8) if g else None
+            f = sh["first"]
+            if g is None and f == 8: foul, why = True, "ตีโดนลูก 8 ก่อน"
+            elif g is not None and (pl_kind(f) if f != 8 else 8) != want: foul, why = True, "ตีโดนลูกผิดกลุ่ม"
+        if not foul and not s.breaking and not [b for b in pk if b != 0] and not sh["rail"]: foul, why = True, "ไม่มีลูกชนขอบเลย"
+        if 8 in pk:
+            if s.breaking:
+                s.b[8].update(x=PL_W * 0.72, y=PL_H / 2, vx=0.0, vy=0.0, on=True)
+                pk = [b for b in pk if b != 8]; s.ev.append(["rail", 0.3])
+            else:
+                g = s.groups[me]
+                win = (not foul) and g is not None and not s.remaining(g)
+                s.phase, s.winner = "over", (me if win else opp)
+                s.msg = (f"{s.names[s.winner] or 'เจ้าของโต๊ะ'} ชนะ! " + ("ลงลูก 8 สำเร็จ" if win else ("ลงลูก 8 ผิดกติกา" if not foul else why + " + ลูก 8 ลง")))
+                s.dirty = True; return
+        s.pocketed += [b for b in pk if b not in (0, 8)]
+        if s.groups[me] is None and not foul:
+            first = [b for b in pk if b not in (0, 8)]
+            if first:
+                s.groups[me] = pl_kind(first[0]); s.groups[opp] = "stripe" if s.groups[me] == "solid" else "solid"
+        own = [b for b in pk if b not in (0, 8) and pl_kind(b) == s.groups[me]]
+        s.breaking = False
+        if 0 in s.b and not s.b[0]["on"]: s.b[0].update(x=PL_HEAD[0], y=PL_H / 2, vx=0.0, vy=0.0, on=True)
+        if foul:
+            s.turn = opp; s.phase = "place"; s.msg = f"ฟาวล์: {why} — {s.names[opp] or 'เจ้าของโต๊ะ'} วางลูกขาวได้เอง"
+        elif own: s.phase = "aim"; s.msg = "ลงลูกได้ ยิงต่อ!"
+        else: s.turn = opp; s.phase = "aim"; s.msg = ""
+        s.start_turn()
+        if foul and s.is_bot(s.turn): s.bot_at = time.time() + 1.0
+        s.dirty = True
+    # ---- บอท ----
+    def bot_targets(s, seat):
+        g = s.groups[seat]
+        if g is None: return [n for n, b in s.b.items() if b["on"] and n not in (0, 8)]
+        r = s.remaining(g)
+        return r if r else [8]
+    def bot_plan_shot(s, seat):
+        c = s.b[0]; cx, cy = c["x"], c["y"]
+        others = [b for n, b in s.b.items() if b["on"] and n != 0]
+        best = None
+        for t in s.bot_targets(seat):
+            tb = s.b[t]; tx, ty = tb["x"], tb["y"]
+            for px, py, pr in PL_POCKETS:
+                ex, ey = px, py
+                if px in (0.0, PL_W) and py in (0.0, PL_H): ex, ey = px + (8 if px == 0 else -8), py + (8 if py == 0 else -8)
+                elif py < 0: ey = 4
+                elif py > PL_H: ey = PL_H - 4
+                dx, dy = ex - tx, ey - ty; dd = math.hypot(dx, dy)
+                if dd < 1: continue
+                ux, uy = dx / dd, dy / dd
+                gx, gy = tx - ux * 2 * PL_R, ty - uy * 2 * PL_R  # ตำแหน่งลูกขาวตอนชน (ghost ball)
+                if not (PL_R <= gx <= PL_W - PL_R and PL_R <= gy <= PL_H - PL_R): continue
+                vx, vy = gx - cx, gy - cy; vd = math.hypot(vx, vy)
+                if vd < 1: continue
+                cos_cut = (vx * ux + vy * uy) / vd
+                if cos_cut < 0.35: continue
+                if any(b["n"] != t and pl_seg_dist(b["x"], b["y"], cx, cy, gx, gy) < 2 * PL_R - 0.5 for b in others): continue
+                if any(b["n"] != t and pl_seg_dist(b["x"], b["y"], tx, ty, ex, ey) < 2 * PL_R - 0.5 for b in others): continue
+                score = (1 - cos_cut) * 3 + (vd + dd) / 1500 + random.random() * 0.15
+                if best is None or score < best[0]: best = (score, math.atan2(vy, vx), vd + dd)
+        if best is None:  # ไม่มีช่องลงชัดๆ: ตีลูกเป้าที่ใกล้สุดแบบเบาๆ
+            ts = s.bot_targets(seat)
+            t = min(ts, key=lambda n: math.hypot(s.b[n]["x"] - cx, s.b[n]["y"] - cy))
+            tb = s.b[t]; d = math.hypot(tb["x"] - cx, tb["y"] - cy)
+            return math.atan2(tb["y"] - cy, tb["x"] - cx) + random.gauss(0, 0.02), min(0.7, 0.3 + d / 1400)
+        _sc, ang, dist = best
+        ang += math.radians(random.gauss(0, 0.9 + dist / 2200))
+        return ang, max(0.3, min(0.95, 0.26 + dist / 1300))
+    def bot_place(s):
+        for _ in range(200):
+            x, y = random.uniform(PL_R, PL_W * 0.45), random.uniform(PL_R, PL_H - PL_R)
+            if s.valid_spot(x, y): s.place(x, y); return
+        s.place(PL_HEAD[0], PL_H / 2) if s.valid_spot(*PL_HEAD) else None
+    # ---- ลูปหลัก ----
+    def loop(s):
+        while not s.closed:
+            try:
+                with s.lock: s.tick()
+            except Exception as e: log_err(e)
+            time.sleep(1 / 60)
+    def tick(s):
+        now = time.time()
+        s.acc += min(0.1, now - s.last); s.last = now
+        if s.phase == "roll":
+            n = 0
+            while s.acc >= PL_DT and n < 24: s.step(); s.acc -= PL_DT; n += 1
+            if not s.moving(): s.resolve()
+            s.nsend = getattr(s, "nsend", 0) + 1
+            if s.nsend % 2 == 0 or s.phase != "roll": s.push()
+            return
+        s.acc = 0.0
+        if s.seats[0] is None: return
+        if s.phase in ("aim", "place") and s.seats[s.turn] is not None and now >= s.turn_at:  # คนจริงหมดเวลา = ฟาวล์
+            opp = 1 - s.turn
+            s.msg = f"{s.names[s.turn]} หมดเวลา — {s.names[opp] or 'เจ้าของโต๊ะ'} วางลูกขาวได้เอง"
+            s.turn = opp; s.phase = "place"; s.breaking = False; s.start_turn(); s.dirty = True
+        elif s.phase in ("aim", "place") and s.is_bot(s.turn) and now >= s.bot_at:
+            if s.phase == "place": s.bot_place()
+            elif s.bot_plan is None:
+                s.bot_plan = s.bot_plan_shot(s.turn); s.aim = [s.bot_plan[0] % (2 * math.pi), 0.0]; s.bot_at = now + 0.9; s.dirty = True
+            else:
+                ang, pw = s.bot_plan; s.shoot(ang, pw, 0.0, 0.0)
+        s.nsend = getattr(s, "nsend", 0) + 1
+        if s.dirty or s.nsend % 10 == 0: s.push()
+    def view(s, seat):
+        return {"t": "pl", "you": seat, "names": [s.names[0] or "เจ้าของโต๊ะ", s.names[1]], "turn": s.turn, "phase": s.phase, "msg": s.msg,
+                "groups": s.groups, "pk": s.pocketed, "winner": s.winner, "left": max(0, int(s.turn_at - time.time())) if s.phase in ("aim", "place") else 0,
+                "aim": [round(s.aim[0], 4), round(s.aim[1], 3)], "bot": [s.is_bot(0), s.is_bot(1)], "breaking": s.breaking,
+                "b": [[n, round(b["x"], 1), round(b["y"], 1), round(b["vx"]), round(b["vy"])] for n, b in s.b.items() if b["on"]], "ev": s.ev[:12]}
+    def push(s):
+        s.dirty = False
+        for i, q in enumerate(s.seats):
+            if q is None: continue
+            try: q["send"](s.view(i))
+            except Exception: q["send"] = lambda o: (_ for _ in ()).throw(OSError("gone"))
+        s.ev = []
+
+def pool_open_table():
+    tb = POOL["table"]
+    if tb is None or tb.closed:
+        tb = POOL["table"] = PoolTable()
+    return tb
+
+def pool_serve(client, addr):  # เซิร์ฟเวอร์ฝั่งเจ้าของโต๊ะพูล: 1 การเชื่อมต่อ = 1 ผู้เล่น (JSON ทีละบรรทัด)
+    tb, seat = POOL["table"], None
+    slk = threading.Lock()
+    def send(o):
+        with slk: client.sendall((json.dumps(o, ensure_ascii=False) + "\n").encode("utf-8"))
+    try:
+        client.settimeout(5)
+        n = client.recv(1)
+        name = b""
+        while n and len(name) < n[0]:
+            d = client.recv(n[0] - len(name))
+            if not d: break
+            name += d
+        name = "".join(ch for ch in name.decode("utf-8", "replace") if ch.isprintable()).strip()[:16] or "ผู้เล่น"
+        if tb is None or tb.closed:
+            send({"t": "none"}); return
+        client.settimeout(10)
+        seat = tb.join(name, send, addr[0] == "127.0.0.1", addr[0])
+        if seat is None:
+            send({"t": "full"}); return
+        client.settimeout(None)
+        buf = b""
+        while not tb.closed:
+            d = client.recv(4096)
+            if not d: break
+            buf += d
+            if len(buf) > 8192: break
+            while b"\n" in buf:
+                ln, buf = buf.split(b"\n", 1)
+                try: a = json.loads(ln.decode("utf-8"))
+                except ValueError: continue
+                if isinstance(a, dict): tb.act(seat, a)
+    except Exception as e:
+        log_err(e)
+    finally:
+        if seat is not None: tb.leave(seat)
+        try: client.close()
+        except Exception: pass
+
+
+PL_BCOL = {1: "#f4c20d", 2: "#1d4fd8", 3: "#d32f2f", 4: "#7b1fa2", 5: "#f57c00", 6: "#2e7d32", 7: "#8d2f1c", 8: "#151515"}
+
+def pool_window(ip, myname=None):  # หน้าต่างพูล 8-ball สไตล์เกมมือถือ: เล็งด้วยเมาส์ + ลากแถบแรงด้านซ้ายแล้วปล่อยเพื่อยิง
+    root = ROOT[0]
+    if root is None: return
+    win = tk.Toplevel(root)
+    win.title("Play pool — 8 Ball"); win.configure(bg="#0e1a2b"); win.resizable(True, True); win.minsize(900, 520)
+    try: win.geometry(f"{min(1380, win.winfo_screenwidth() - 60)}x{min(790, win.winfo_screenheight() - 100)}+20+20")
+    except Exception: win.geometry("1300x760")
+    try: win.iconbitmap(ICON_PATH)
+    except Exception: pass
+    KK = {"k": 1.0}
+    F = lambda n, b=False: ("Segoe UI", max(6, round(n * KK["k"])), "bold") if b else ("Segoe UI", max(6, round(n * KK["k"])))
+    W, H, FX, FY, R = 1300, 740, 130, 150, PL_R
+    st = {"m": None, "sock": None, "dead": False, "note": "", "balls": {}, "t_snap": time.time(), "items": {}, "ang": 0.0, "pull": 0.0, "pw": 0.0, "drag": False,
+          "sx": 0.0, "sy": 0.0, "mx": FX + 250.0, "my": FY + 250.0, "sent": False, "last_aim": 0.0, "lastmsg": "", "me": "", "popt": 0.0}
+    mid = tk.Frame(win, bg="#0e1a2b"); mid.pack(fill="both", expand=True)
+    cv = tk.Canvas(mid, width=W, height=H, bg="#0e1a2b", highlightthickness=0); cv.pack(expand=True)
+    K = lambda: KK["k"]
+    def rr(x1, y1, x2, y2, r, **kw):
+        p = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+        return cv.create_polygon(p, smooth=True, splinesteps=10, **kw)
+    def fit(tag):
+        if K() != 1.0: cv.scale(tag, 0, 0, K(), K())
+    def tcoord(x, y): return (FX + x) * K(), (FY + y) * K()
+    def send(o):
+        try: st["sock"].sendall((json.dumps(o) + "\n").encode("utf-8"))
+        except Exception: pass
+    def mine():
+        m = st["m"]; return bool(m) and m["turn"] == m["you"]
+
+    # ---------- พื้นหลัง/โต๊ะ ----------
+    def build_bg():
+        cv.delete("bg")
+        for i in range(40):
+            t = i / 39
+            col = "#%02x%02x%02x" % (int(14 + 6 * t), int(26 + 14 * t), int(43 + 22 * t))
+            cv.create_rectangle(0, i * H / 40, W, (i + 1) * H / 40 + 1, fill=col, outline=col, tags="bg")
+        rr(FX - 40, FY - 40, FX + 1040, FY + 540, 34, fill="#2b1608", outline="#0b0502", width=3, tags="bg")
+        rr(FX - 34, FY - 34, FX + 1034, FY + 534, 30, fill="#6b3a17", outline="#8a5426", width=3, tags="bg")
+        rr(FX - 12, FY - 12, FX + 1012, FY + 512, 12, fill="#0a5c34", outline="#06361e", width=3, tags="bg")
+        cv.create_rectangle(FX, FY, FX + 1000, FY + 500, fill="#12804a", outline="#0b5a33", width=2, tags="bg")
+        cv.create_oval(FX + 140, FY + 60, FX + 860, FY + 440, fill="#16905a", outline="", stipple="gray25", tags="bg")
+        cv.create_line(FX + 250, FY, FX + 250, FY + 500, fill="#0f6e3e", width=2, tags="bg")
+        cv.create_oval(FX + 246, FY + 246, FX + 254, FY + 254, fill="#0f6e3e", outline="", tags="bg")
+        cv.create_oval(FX + 716, FY + 246, FX + 724, FY + 254, fill="#0f6e3e", outline="", tags="bg")
+        for px, py, pr in PL_POCKETS:
+            r = pr * 0.92
+            cv.create_oval(FX + px - r - 4, FY + py - r - 4, FX + px + r + 4, FY + py + r + 4, fill="#2b1608", outline="", tags="bg")
+            cv.create_oval(FX + px - r, FY + py - r, FX + px + r, FY + py + r, fill="#050505", outline="#222", width=2, tags="bg")
+        for i in range(1, 8):  # จุดไดมอนด์บนขอบโต๊ะ
+            for yy in (FY - 22, FY + 522):
+                if i != 4: cv.create_polygon(FX + i * 125, yy - 5, FX + i * 125 + 5, yy, FX + i * 125, yy + 5, FX + i * 125 - 5, yy, fill="#e8d9a8", outline="", tags="bg")
+        for j in (1, 2, 3):
+            for xx in (FX - 22, FX + 1022):
+                cv.create_polygon(xx - 5, FY + j * 125, xx, FY + j * 125 + 5, xx + 5, FY + j * 125, xx, FY + j * 125 - 5, fill="#e8d9a8", outline="", tags="bg")
+        fit("bg"); cv.tag_lower("bg")
+
+    # ---------- ลูกบิลเลียด ----------
+    def mk_ball(n):
+        r = R; col = PL_BCOL.get(n if n <= 8 else n - 8, "#ffffff")
+        ids = [cv.create_oval(0, 0, 1, 1, fill="#000000", outline="", stipple="gray50", tags="ball")]
+        if n == 0 or n <= 8: ids.append(cv.create_oval(0, 0, 1, 1, fill="#f7f7f2" if n == 0 else col, outline="#222222", width=1, tags="ball"))
+        else:
+            ids.append(cv.create_oval(0, 0, 1, 1, fill=col, outline="#222222", width=1, tags="ball"))
+            ids.append(cv.create_arc(0, 0, 1, 1, start=26.7, extent=126.6, style="chord", fill="#f7f7f2", outline="", tags="ball"))
+            ids.append(cv.create_arc(0, 0, 1, 1, start=206.7, extent=126.6, style="chord", fill="#f7f7f2", outline="", tags="ball"))
+        if n:
+            ids.append(cv.create_oval(0, 0, 1, 1, fill="#f7f7f2", outline="", tags="ball"))
+            ids.append(cv.create_text(0, 0, text=str(n), fill="#111111", font=F(8, True), tags="ball"))
+        else: ids.append(cv.create_oval(0, 0, 1, 1, fill="#ffffff", outline="", stipple="gray50", tags="ball"))
+        return ids
+    def place_ball(n, x, y):
+        ids = st["items"].get(n)
+        if ids is None: ids = st["items"][n] = mk_ball(n)
+        cx, cy = tcoord(x, y); r = R * K(); k = K()
+        cv.coords(ids[0], cx - r + 2 * k, cy - r + 3 * k, cx + r + 2 * k, cy + r + 3 * k)
+        for it in ids[1:]:
+            t = cv.type(it)
+            if t == "text": cv.coords(it, cx, cy)
+            else:
+                rr_ = r * 0.52 if (n and it == ids[-2]) else r * 0.42 if (not n and it == ids[-1]) else r
+                if not n and it == ids[-1]: cv.coords(it, cx - r * 0.45 - r * 0.15, cy - r * 0.6, cx - r * 0.05, cy - r * 0.2)
+                else: cv.coords(it, cx - rr_, cy - rr_, cx + rr_, cy + rr_)
+    def clear_balls():
+        for ids in st["items"].values():
+            for it in ids: cv.delete(it)
+        st["items"] = {}
+    def sink(n, x, y):  # ลูกลงหลุม: หดหายเร็วๆ
+        px, py, pr = min(PL_POCKETS, key=lambda p: (p[0] - x) ** 2 + (p[1] - y) ** 2)
+        cx, cy = tcoord(px, py); col = "#f7f7f2" if n == 0 else PL_BCOL.get(n if n <= 8 else n - 8, "#fff")
+        it = cv.create_oval(0, 0, 1, 1, fill=col, outline="", tags="sink")
+        def f(k=0):
+            if st["dead"] or k > 7: cv.delete(it); return
+            rr_ = R * K() * (1 - k / 8)
+            cv.coords(it, cx - rr_, cy - rr_, cx + rr_, cy + rr_); win.after(30, f, k + 1)
+        f()
+    def ball_pos(n, now):  # คาดการณ์ตำแหน่งระหว่างรอ snapshot ถัดไป (ส่งมา 30 ครั้ง/วินาที)
+        b = st["balls"][n]; dt = min(0.08, now - st["t_snap"])
+        if b[3] or b[4]: return b[1] + b[3] * dt * 0.97, b[2] + b[4] * dt * 0.97
+        return b[1], b[2]
+
+    # ---------- เส้นเล็ง / ไม้คิว (วาดใหม่ทุกเฟรม) ----------
+    def trace(cx, cy, ang):  # คืน (ชนอะไร, จุดชน, ลูกเป้า)
+        dx, dy = math.cos(ang), math.sin(ang)
+        best, kind, obj = 1e9, "wall", None
+        for n, b in st["balls"].items():
+            if n == 0: continue
+            qx, qy = b[1] - cx, b[2] - cy
+            tproj = qx * dx + qy * dy
+            if tproj <= 0: continue
+            d2 = qx * qx + qy * qy - tproj * tproj
+            if d2 >= 4 * R * R: continue
+            t = tproj - math.sqrt(4 * R * R - d2)
+            if t < best: best, kind, obj = t, "ball", b
+        tw = 1e9
+        if dx > 1e-9: tw = min(tw, (PL_W - R - cx) / dx)
+        elif dx < -1e-9: tw = min(tw, (R - cx) / dx)
+        if dy > 1e-9: tw = min(tw, (PL_H - R - cy) / dy)
+        elif dy < -1e-9: tw = min(tw, (R - cy) / dy)
+        if tw < best: best, kind, obj = tw, "wall", None
+        return kind, cx + dx * best, cy + dy * best, obj
+    def draw_dyn():
+        cv.delete("dyn")
+        m = st["m"]; now = time.time()
+        if not m or 0 not in st["balls"]: return
+        k = K()
+        ccx, ccy = ball_pos(0, now)
+        if m["phase"] == "place":
+            if mine():
+                ok = st["m"] and all(n == 0 or math.hypot(b[1] - st["mx"] + FX, b[2] - st["my"] + FY) >= 2 * R + 0.5 for n, b in st["balls"].items()) and R <= st["mx"] - FX <= PL_W - R and R <= st["my"] - FY <= PL_H - R
+                x, y = tcoord(min(max(st["mx"] - FX, R), PL_W - R), min(max(st["my"] - FY, R), PL_H - R)); r = R * k
+                cv.create_oval(x - r, y - r, x + r, y + r, fill="#f7f7f2", outline="#3ddc84" if ok else "#ff5252", width=3, tags="dyn", stipple="gray50")
+            return
+        if m["phase"] != "aim": return
+        me_ = mine()
+        ang, pull = (st["ang"], st["pw"]) if me_ else (m["aim"][0], m["aim"][1])
+        dx, dy = math.cos(ang), math.sin(ang)
+        if me_:
+            kind, hx, hy, obj = trace(ccx, ccy, ang)
+            x0, y0 = tcoord(ccx, ccy); x1, y1 = tcoord(hx, hy)
+            cv.create_line(x0, y0, x1, y1, fill="#ffffff", width=max(1, 2 * k), dash=(8, 6), tags="dyn")
+            r = R * k
+            cv.create_oval(x1 - r, y1 - r, x1 + r, y1 + r, outline="#ffffff", width=max(1, 2 * k), tags="dyn")
+            if kind == "ball":
+                nx, ny = (obj[1] - hx) / (2 * R), (obj[2] - hy) / (2 * R)
+                ox, oy = tcoord(obj[1], obj[2]); ex, ey = tcoord(obj[1] + nx * 90, obj[2] + ny * 90)
+                cv.create_line(ox, oy, ex, ey, fill="#ffe082", width=max(1, 2 * k), tags="dyn")
+                dd = dx * nx + dy * ny; tx, ty = dx - dd * nx, dy - dd * ny; tl = math.hypot(tx, ty)
+                if tl > 0.08:
+                    ax, ay = tcoord(hx + tx / tl * 55, hy + ty / tl * 55)
+                    cv.create_line(x1, y1, ax, ay, fill="#b0bec5", width=max(1, 2 * k), tags="dyn")
+            else:
+                rx, ry = dx, dy
+                if abs(hx - R) < 1 or abs(hx - (PL_W - R)) < 1: rx = -dx
+                if abs(hy - R) < 1 or abs(hy - (PL_H - R)) < 1: ry = -dy
+                ax, ay = tcoord(hx + rx * 130, hy + ry * 130)
+                cv.create_line(x1, y1, ax, ay, fill="#b0bec5", width=max(1, 2 * k), dash=(4, 6), tags="dyn")
+        # ไม้คิว
+        back = (R + 5 + pull * 130) * k; L = 420 * k; cx0, cy0 = tcoord(ccx, ccy)
+        bx0, by0 = cx0 - dx * back, cy0 - dy * back; bx1, by1 = cx0 - dx * (back + L), cy0 - dy * (back + L)
+        px_, py_ = -dy, dx
+        w0, w1 = 2.2 * k, 5.2 * k
+        cv.create_polygon(bx0 + px_ * w0, by0 + py_ * w0, bx0 - px_ * w0, by0 - py_ * w0, bx1 - px_ * w1, by1 - py_ * w1, bx1 + px_ * w1, by1 + py_ * w1, fill="#d9a35f", outline="#4a2a10", tags="dyn")
+        mx_, my_ = bx0 - dx * L * 0.62, by0 - dy * L * 0.62
+        cv.create_polygon(mx_ + px_ * 4 * k, my_ + py_ * 4 * k, mx_ - px_ * 4 * k, my_ - py_ * 4 * k, bx1 - px_ * w1, by1 - py_ * w1, bx1 + px_ * w1, by1 + py_ * w1, fill="#3a2414", outline="#1a0f08", tags="dyn")
+        cv.create_line(bx0, by0, bx0 - dx * 9 * k, by0 - dy * 9 * k, fill="#4fc3f7", width=max(2, 4 * k), tags="dyn")
+
+    # ---------- HUD ----------
+    def draw_player(seat, x):
+        m = st["m"]; name = m["names"][seat]; g = m["groups"][seat]; on = m["turn"] == seat and m["phase"] in ("aim", "place", "roll")
+        rr(x, 8, x + 400, 108, 18, fill="#16294a" if not on else "#1f3d6e", outline="#ffd54f" if on else "#35507f", width=3, tags="hud")
+        col = ("#e53935", "#1e88e5")[seat]
+        if on: cv.create_oval(x + 8, 20, x + 76, 88, outline="#ffeb3b", width=4, tags="hud")
+        cv.create_oval(x + 14, 26, x + 70, 82, fill=col, outline="#ffffff", width=3, tags="hud")
+        cv.create_text(x + 42, 54, text=name[:1].upper(), fill="#ffffff", font=F(24, True), tags="hud")
+        if m["bot"][seat]:
+            rr(x + 52, 70, x + 80, 86, 5, fill="#37474f", outline="#ffffff", tags="hud"); cv.create_text(x + 66, 78, text="BOT", fill="#ffffff", font=F(8, True), tags="hud")
+        cv.create_text(x + 90, 32, text=name + (" (คุณ)" if seat == m["you"] else ""), fill="#ffffff", font=F(15, True), anchor="w", tags="hud")
+        cv.create_text(x + 90, 54, text={"solid": "ลูกเต็ม 1-7", "stripe": "ลูกครึ่ง 9-15", None: "ยังไม่เลือกกลุ่ม"}[g], fill="#ffe082", font=F(11), anchor="w", tags="hud")
+        nums = list(range(1, 8)) if g == "solid" else list(range(9, 16)) if g == "stripe" else []
+        if g: nums.append(8)
+        for i, n in enumerate(nums):
+            bx, by = x + 100 + i * 36, 86
+            gone = n in m["pk"] or (n == 8 and m["phase"] == "over")
+            c = PL_BCOL.get(n if n <= 8 else n - 8, "#fff")
+            cv.create_oval(bx - 12, by - 12, bx + 12, by + 12, fill=c if gone else "#0f1c33", outline="#ffffff" if gone else "#35507f", width=2, tags="hud")
+            cv.create_text(bx, by, text=str(n), fill="#ffffff" if n in (1, 5) and False else ("#111111" if n in (1, 5, 9, 13) and gone else "#ffffff" if gone else "#35507f"), font=F(9, True), tags="hud")
+    def btn(tag, x, y, w, h, text, color, size=13, enabled=True):
+        rr(x - w / 2, y - h / 2 + 4, x + w / 2, y + h / 2 + 4, 14, fill="#050b16", outline="", tags=("hud", tag))
+        rr(x - w / 2, y - h / 2, x + w / 2, y + h / 2, 14, fill=color if enabled else "#4a5568", outline="#ffffff", width=2, tags=("hud", tag))
+        cv.create_text(x, y, text=text, fill="#ffffff", font=F(size, True), tags=("hud", tag))
+    def draw_hud():
+        cv.delete("hud")
+        m = st["m"]
+        if not m:
+            tx = st["note"] or "กำลังเชื่อมต่อ ..."
+            rr(W / 2 - 260, 330, W / 2 + 260, 390, 24, fill="#16294a", outline="#ffd54f", width=3, tags="hud")
+            cv.create_text(W / 2, 360, text=tx, fill="#ffffff", font=F(18, True), tags="hud")
+            fit("hud"); return
+        draw_player(0, 20); draw_player(1, W - 420)
+        ph, left = m["phase"], m["left"]
+        if st["note"]: tx, bg, fg = st["note"], "#b71c1c", "#ffffff"
+        elif ph == "aim": tx, bg, fg = (f"ตาของคุณ ⏱{left}", "#ffd54f", "#3e2714") if mine() else (f"ตาของ {m['names'][m['turn']]} ⏱{left}", "#16294a", "#ffe082")
+        elif ph == "place": tx, bg, fg = (f"วางลูกขาวได้เลย ⏱{left}", "#ffd54f", "#3e2714") if mine() else (f"{m['names'][m['turn']]} กำลังวางลูกขาว", "#16294a", "#ffe082")
+        elif ph == "roll": tx, bg, fg = "ลูกกำลังกลิ้ง ...", "#16294a", "#ffffff"
+        else: tx, bg, fg = m["msg"], "#2e7d32", "#ffffff"
+        tw = max(260, len(tx) * 15 + 40)
+        rr(W / 2 - tw / 2, 24, W / 2 + tw / 2, 78, 24, fill=bg, outline="#ffffff", width=3, tags="hud")
+        cv.create_text(W / 2, 51, text=tx, fill=fg, font=F(18, True), tags="hud")
+        # แถบแรง (ซ้าย)
+        cv.create_text(62, 128, text="แรง", fill="#ffe082", font=F(13, True), tags="hud")
+        rr(40, FY, 84, FY + 500, 18, fill="#0b1626", outline="#35507f", width=3, tags="hud")
+        p = st["pw"]
+        if p > 0:
+            col = "#%02x%02x%02x" % (int(60 + 195 * p), int(220 - 150 * p), 60)
+            rr(46, FY + 6, 78, FY + 6 + p * 488, 12, fill=col, outline="", tags="hud")
+        hy = FY + 6 + p * 488
+        rr(32, hy - 14, 92, hy + 14, 10, fill="#ffffff" if (mine() and ph == "aim") else "#6b7a90", outline="#1a1a1a", width=2, tags="hud")
+        cv.create_line(44, hy - 5, 80, hy - 5, 44, hy + 5, 80, hy + 5, fill="#8a96a8", width=2, tags="hud") if False else None
+        # วงหมุนลูก (ขวา)
+        sx0, sy0 = 1232, 300
+        cv.create_text(sx0, 232, text="หมุนลูก", fill="#ffe082", font=F(13, True), tags="hud")
+        cv.create_oval(sx0 - 56, sy0 - 56, sx0 + 56, sy0 + 56, fill="#f7f7f2", outline="#ffffff", width=4, tags="hud")
+        cv.create_line(sx0 - 56, sy0, sx0 + 56, sy0, fill="#d0d0c8", tags="hud"); cv.create_line(sx0, sy0 - 56, sx0, sy0 + 56, fill="#d0d0c8", tags="hud")
+        dx_, dy_ = sx0 + st["sx"] * 40, sy0 - st["sy"] * 40
+        cv.create_oval(dx_ - 9, dy_ - 9, dx_ + 9, dy_ + 9, fill="#d32f2f", outline="#7f0000", width=2, tags="hud")
+        cv.create_text(sx0, sy0 + 80, text="บน = ตาม  ล่าง = ดึง\nซ้าย/ขวา = เบี่ยง", fill="#b0bec5", font=F(10), justify="center", tags="hud")
+        btn("b_snd", sx0, 420, 110, 36, "เสียง " + ("ปิด" if cfg.get("poker_mute") else "เปิด"), "#455a64", 12)
+        btn("b_inv", sx0, 470, 110, 36, "เชิญเพื่อน", "#2e9e3a", 12)
+        btn("b_rul", sx0, 520, 110, 36, "วิธีเล่น", "#546e7a", 12)
+        # คำแนะนำ
+        if ph == "aim" and mine(): hint = ("เปิดเกม: " if m["breaking"] else "") + "ชี้เมาส์ไปทางที่จะยิง → ลากแถบ 'แรง' ด้านซ้ายลงแล้วปล่อยเพื่อยิง  •  ล้อเมาส์ = ปรับองศาละเอียด  •  คลิกวงขวา = หมุนลูก"
+        elif ph == "place" and mine(): hint = "ฟาวล์ของอีกฝ่าย: เลื่อนเมาส์ไปที่ที่อยากวางลูกขาว แล้วคลิกยืนยัน"
+        elif ph == "over": hint = "จบเกม — กด 'เล่นอีกครั้ง' ที่กลางโต๊ะ"
+        elif ph == "roll": hint = "ลูกกำลังกลิ้ง ..."
+        else: hint = f"รอ {m['names'][m['turn']]} ..."
+        pill_w = min(W - 100, len(hint) * 10 + 40)
+        rr(W / 2 - pill_w / 2, 696, W / 2 + pill_w / 2, 728, 16, fill="#050b16", outline="#ffd54f", width=2, tags="hud")
+        cv.create_text(W / 2, 712, text=hint, fill="#ffffff", font=F(12, True), tags="hud")
+        if ph == "over": btn("b_again", FX + 500, FY + 380, 260, 64, "เล่นอีกครั้ง", "#2e9e3a", 20)
+        fit("hud")
+    def popup(txt, col="#ffffff"):
+        cv.delete("pop")
+        for dx, dy, c in ((3, 3, "#000000"), (0, 0, col)): cv.create_text(FX + 500 + dx, FY + 250 + dy, text=txt, fill=c, font=F(30, True), width=900, tags="pop")
+        fit("pop"); st["popt"] = time.time() + 2.6
+
+    # ---------- ข้อความจากโต๊ะ ----------
+    def on_state(o):
+        prev = st["m"]; st["m"] = o; st["note"] = ""
+        now = time.time(); st["t_snap"] = now
+        old = st["balls"]; st["balls"] = {b[0]: b for b in o["b"]}
+        for n, b in old.items():
+            if n not in st["balls"] and prev and prev["phase"] == "roll": sink(n, b[1], b[2])
+        for n in list(st["items"]):
+            if n not in st["balls"]:
+                for it in st["items"].pop(n): cv.delete(it)
+        for ev in o["ev"]:
+            nm, vol = ev
+            if nm == "cue": pok_snd("cue")
+            elif nm == "clack" and vol > 0.12: pok_snd("clack")
+            elif nm == "rail" and vol > 0.2: pok_snd("rail")
+            elif nm == "pocket": pok_snd("pocket")
+        if o["msg"] and o["msg"] != st["lastmsg"] and o["phase"] != "over": popup(o["msg"], "#ffe082")
+        if o["phase"] == "over" and (prev is None or prev["phase"] != "over"):
+            pok_snd("win" if o["winner"] == o["you"] else "lose"); popup(o["msg"], "#69f0ae" if o["winner"] == o["you"] else "#ff8a80")
+        if o["phase"] == "aim" and o["turn"] == o["you"] and (prev is None or prev["phase"] != "aim" or prev["turn"] != o["turn"]):
+            st["sent"] = False; st["pw"] = 0.0; st["drag"] = False
+            if 0 in st["balls"]: st["ang"] = math.atan2(st["my"] - FY - st["balls"][0][2], st["mx"] - FX - st["balls"][0][1])
+            pok_snd("turn")
+        st["lastmsg"] = o["msg"]
+        mp = o["names"][o["you"]]; st["me"] = mp
+        if prev is None or prev["phase"] != o["phase"] or prev["turn"] != o["turn"] or prev["msg"] != o["msg"] or prev["groups"] != o["groups"] or prev["pk"] != o["pk"] or prev["left"] != o["left"]: draw_hud()
+    def on_msg(o):
+        if st["dead"]: return
+        t = o.get("t")
+        if t == "pl": on_state(o)
+        elif t in ("none", "full", "closed"):
+            st["note"] = {"none": "เครื่องนี้ยังไม่ได้เปิดโต๊ะพูล", "full": "โต๊ะเต็ม (เล่นได้ 2 คน)", "closed": "เจ้าของโต๊ะปิดโต๊ะแล้ว"}[t]
+            if t != "closed": st["m"] = None
+            draw_hud()
+    def on_end():
+        if st["dead"]: return
+        st["note"] = "หลุดการเชื่อมต่อ" if st["m"] else "เชื่อมต่อโต๊ะไม่ได้ (เครื่องปลายทางอาจยังไม่ใช่รุ่น 9.0.0 หรือไม่ได้เปิดโต๊ะ)"
+        draw_hud()
+    def reader():
+        buf = b""
+        try:
+            s = socket.create_connection((ip, CTRL_PORT), timeout=6)
+            st["sock"] = s
+            nb = (myname or username() or HOSTNAME).encode("utf-8")[:60]
+            s.sendall(b"Q" + bytes([len(nb)]) + nb)
+            s.settimeout(None)
+            while True:
+                d = s.recv(65536)
+                if not d: break
+                buf += d
+                while b"\n" in buf:
+                    ln, buf = buf.split(b"\n", 1)
+                    try: o = json.loads(ln.decode("utf-8"))
+                    except ValueError: continue
+                    root.after(0, on_msg, o)
+        except Exception as e:
+            log_err(e)
+        root.after(0, on_end)
+
+    # ---------- เมาส์ ----------
+    def to_base(e): return e.x / K(), e.y / K()
+    def aim_to(bx, by):
+        b = st["balls"].get(0)
+        if not b: return
+        if (bx - FX) ** 2 + (by - FY) ** 2 < 4 and False: return
+        st["ang"] = math.atan2(by - FY - b[2], bx - FX - b[1])
+    def send_aim(force=False):
+        now = time.time()
+        if force or now - st["last_aim"] > 0.08:
+            st["last_aim"] = now; send({"a": "aim", "ang": round(st["ang"], 4), "pull": round(st["pw"], 3)})
+    def on_motion(e):
+        bx, by = to_base(e); st["mx"], st["my"] = bx, by
+        m = st["m"]
+        if not m: return
+        if st["drag"]:
+            st["pw"] = max(0.0, min(1.0, (by - FY - 6) / 488)); draw_hud(); send_aim(); return
+        if m["phase"] == "aim" and mine() and not st["sent"] and FX - 50 <= bx <= FX + 1050 and FY - 50 <= by <= FY + 550:
+            aim_to(bx, by); send_aim()
+    def on_wheel(e):
+        m = st["m"]
+        if not m or not (m["phase"] == "aim" and mine()) or st["sent"]: return
+        d = e.delta if hasattr(e, "delta") and e.delta else (120 if e.num == 4 else -120)
+        st["ang"] += math.radians(0.2) * (1 if d > 0 else -1); send_aim(True)
+    def in_box(bx, by, x1, y1, x2, y2): return x1 <= bx <= x2 and y1 <= by <= y2
+    def on_press(e):
+        bx, by = to_base(e); m = st["m"]
+        if not m: return
+        st["mx"], st["my"] = bx, by
+        if in_box(bx, by, 1176, 402, 1288, 438): cfg["poker_mute"] = not cfg.get("poker_mute", False); save_config(cfg); pok_snd("clack"); draw_hud(); return
+        if in_box(bx, by, 1176, 452, 1288, 488): invite_dialog(); return
+        if in_box(bx, by, 1176, 502, 1288, 538): rules(); return
+        if m["phase"] == "over" and in_box(bx, by, FX + 370, FY + 348, FX + 630, FY + 412): send({"a": "rematch"}); return
+        if m["phase"] == "aim" and mine() and not st["sent"]:
+            if in_box(bx, by, 28, FY - 20, 96, FY + 520): st["drag"] = True; st["pw"] = max(0.0, min(1.0, (by - FY - 6) / 488)); draw_hud(); return
+            if (bx - 1232) ** 2 + (by - 300) ** 2 <= 62 * 62:
+                vx, vy = (bx - 1232) / 40, -(by - 300) / 40; d = math.hypot(vx, vy)
+                if d > 1: vx, vy = vx / d, vy / d
+                st["sx"], st["sy"] = round(vx, 2), round(vy, 2); draw_hud(); return
+        if m["phase"] == "place" and mine() and in_box(bx, by, FX, FY, FX + 1000, FY + 500):
+            send({"a": "place", "x": round(bx - FX, 1), "y": round(by - FY, 1)})
+    def on_release(e):
+        if not st["drag"]: return
+        st["drag"] = False
+        m = st["m"]
+        if m and m["phase"] == "aim" and mine() and not st["sent"] and st["pw"] > 0.04:
+            st["sent"] = True; send({"a": "shot", "ang": round(st["ang"], 4), "pw": round(st["pw"], 3), "sx": st["sx"], "sy": st["sy"]})
+            st["pw"] = 0.0
+        else: st["pw"] = 0.0
+        draw_hud()
+    cv.bind("<Motion>", on_motion); cv.bind("<ButtonPress-1>", on_press); cv.bind("<B1-Motion>", on_motion); cv.bind("<ButtonRelease-1>", on_release)
+    cv.bind("<MouseWheel>", on_wheel); cv.bind("<Button-4>", on_wheel); cv.bind("<Button-5>", on_wheel)
+
+    def rules():
+        w = tk.Toplevel(win); w.title("วิธีเล่น"); w.configure(bg="#16294a")
+        tk.Label(w, text=POOL_RULES, bg="#16294a", fg="white", font=("Segoe UI", 12), justify="left", wraplength=640, padx=18, pady=14).pack()
+    def invite_dialog():
+        d = tk.Toplevel(win); d.title("เชิญเพื่อนเล่นพูล"); d.configure(bg="#16294a"); d.resizable(False, False)
+        tk.Label(d, text="เลือกเครื่องที่จะเชิญ (ต้องเป็นรุ่น 9.0.0 ขึ้นไป)", bg="#16294a", fg="white", font=("Segoe UI", 11)).pack(padx=16, pady=(14, 6))
+        lb = tk.Listbox(d, width=34, height=8, font=("Segoe UI", 11), bg="#0b1626", fg="white", selectbackground="#2e7d32", relief="flat", highlightthickness=0, exportselection=False); lb.pack(padx=16)
+        rows = []; now = time.time()
+        with peers_lock:
+            for uid, v in peers.items():
+                if now - v.get("last", 0) > 9 or v.get("stealth"): continue
+                try: okv = ver_tuple(v.get("ver", "")) >= (9, 0, 0)
+                except Exception: okv = False
+                ips = sorted(set(v.get("ips", ())) | ({v["ip"]} if v.get("ip") else set()))
+                rows.append((ips, okv, (v.get("code") or v.get("host") or "?") + ("" if okv else "  (รุ่นเก่า)")))
+        for r_ in rows: lb.insert("end", r_[2])
+        msg = tk.Label(d, text="", bg="#16294a", fg="#ffe082", font=("Segoe UI", 10)); msg.pack(pady=4)
+        def go():
+            i = lb.curselection()
+            if not i: msg.config(text="คลิกเลือกชื่อก่อน"); return
+            ips, okv, _t = rows[i[0]]
+            if not okv: msg.config(text="เครื่องนี้ยังเป็นรุ่นเก่า ต้องอัปเดตก่อน"); return
+            me_nm = st["me"] or myname or username() or HOSTNAME; host_ip = "" if ip == "127.0.0.1" else ip
+            def work():
+                err = None
+                for tip in ips:
+                    err = poker_invite_send(tip, me_nm, host_ip, "pool")
+                    if err is None: break
+                root.after(0, lambda: msg.config(text="ส่งคำเชิญแล้ว" if err is None else "ส่งไม่ได้: " + err[:50]))
+            threading.Thread(target=work, daemon=True).start()
+        tk.Button(d, text="เชิญ", bg="#2e9e3a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=20, pady=4, command=go).pack(pady=(2, 14))
+
+    # ---------- ลูปเฟรม / ปรับขนาด ----------
+    def frame():
+        if st["dead"]: return
+        now = time.time()
+        if st["m"] and st["balls"]:
+            for n in st["balls"]:
+                x, y = ball_pos(n, now); place_ball(n, x, y)
+            cv.tag_raise("ball", "bg")
+        draw_dyn()
+        cv.tag_raise("dyn"); cv.tag_raise("sink"); cv.tag_raise("hud"); cv.tag_raise("pop")
+        if st["popt"] and now > st["popt"]: cv.delete("pop"); st["popt"] = 0.0
+        win.after(16, frame)
+    RZ = {"j": None}
+    def do_resize():
+        RZ["j"] = None
+        if st["dead"]: return
+        k = max(0.4, min(mid.winfo_width() / W, mid.winfo_height() / H))
+        if abs(k - KK["k"]) < 0.01: return
+        KK["k"] = k; cv.config(width=int(W * k), height=int(H * k))
+        clear_balls(); build_bg(); draw_hud()
+    def on_cfg(e):
+        if e.widget is mid:
+            if RZ["j"]: win.after_cancel(RZ["j"])
+            RZ["j"] = win.after(90, do_resize)
+    mid.bind("<Configure>", on_cfg)
+    win.bind("<F11>", lambda e: win.attributes("-fullscreen", not win.attributes("-fullscreen")))
+    def close():
+        if not st["dead"]: POOL_ACTIVE[0] = max(0, POOL_ACTIVE[0] - 1)
+        st["dead"] = True
+        try: st["sock"].close()
+        except Exception: pass
+        win.destroy()
+    win.protocol("WM_DELETE_WINDOW", close)
+    POOL_ACTIVE[0] += 1
+    threading.Thread(target=reader, daemon=True).start()
+    build_bg(); draw_hud(); frame()
+
+POOL_RULES = ("วิธีเล่นพูล 8-ball (ใช้เมาส์อย่างเดียว)\n"
+              "1) เลื่อนเมาส์บนโต๊ะ — เส้นเล็งจะชี้ไปทางเมาส์ (ล้อเมาส์ = ปรับองศาละเอียด)\n"
+              "2) เอาเมาส์ไปจับแถบ 'แรง' ด้านซ้าย ลากลงแล้วปล่อยเพื่อยิง ยิ่งลากลงมากยิ่งแรง\n"
+              "3) วงขวา 'หมุนลูก': คลิกจุดบนลูกขาว บน = ลูกตาม ล่าง = ลูกดึง ซ้าย/ขวา = เบี่ยงตอนชนขอบ\n\n"
+              "กติกา: หลังเปิดเกม ลูกแรกที่คุณยิงลงจะกำหนดกลุ่ม (เต็ม 1-7 / ครึ่ง 9-15) ลงลูกกลุ่มตัวเองได้ยิงต่อ\n"
+              "ต้องตีโดนลูกกลุ่มตัวเองก่อน ถ้าลูกขาวลงหลุม/ไม่โดนลูก/โดนผิดกลุ่ม/ไม่มีลูกชนขอบ = ฟาวล์ อีกฝ่ายวางลูกขาวได้เอง\n"
+              "ลงลูกกลุ่มตัวเองหมดแล้วค่อยลูก 8 (ลงหลุมไหนก็ได้) ลูก 8 ลงก่อนเวลา/ฟาวล์ตอนลง = แพ้\n"
+              "แต่ละตามีเวลา 40 วินาที หมดเวลา = ฟาวล์")
+
 
 def desktop_dir():
     buf = ctypes.create_unicode_buffer(260)
@@ -3618,7 +4418,7 @@ def main():
             return
         with peers_lock:
             ips = [ip] + sorted(peers.get(uid, {}).get("ips", set()) - {ip})
-        who = str(tree.item(uid)["values"][1]).replace("♠ ", "", 1)
+        who = str(tree.item(uid)["values"][1]).replace("♠ ", "", 1).replace("◉ ", "", 1)
         ask_quality(who, lambda q, mon: threading.Thread(target=open_viewer, args=(ips, q, None, False, mon), daemon=True).start(), ip=ip)
     lbl_status = tk.Label(right, text="พร้อมใช้งาน", bg=PANEL, fg=SUBTEXT, anchor="w", justify="left", wraplength=S(340))
     lbl_status.pack(side="bottom", fill="x", padx=16, pady=(0, 12))
@@ -3652,6 +4452,28 @@ def main():
         ttk.Button(row, text="เข้าร่วมโต๊ะของเครื่องที่เลือก", style="Go.TButton", command=join).pack(side="right", padx=10)
         ttk.Button(row, text="ยกเลิก", style="Ghost.TButton", command=dim.destroy).pack(side="right")
     add_flow(crow, ttk.Button(crow, text="Play poker", style="Go.TButton", command=play_poker))
+    def play_pool():
+        dim, w, c = popup("Play pool (8-ball)")
+        tk.Label(w, text="พูล 8-ball ใช้เมาส์อย่างเดียว เล่นกับบอท หรือเพื่อน 1 คน (2 คน)\nเปิดโต๊ะที่เครื่องนี้ (บอทเล่นด้วยจนกว่าเพื่อนจะเข้า) หรือเข้าร่วมโต๊ะของเครื่องที่เลือกในรายการ", bg=c(PANEL), fg=c(SUBTEXT), font=FNT(13), justify="left",
+                 wraplength=max(min(S(620), root.winfo_width() - S(120)), S(240))).pack(anchor="w", padx=S(24), pady=(0, S(8)))
+        def host():
+            dim.destroy()
+            poker_start("127.0.0.1", True, "pool")
+        def join():
+            sel_item = tree.selection()
+            if not sel_item:
+                dim.destroy(); notify("คลิกเลือกเครื่องของเจ้าของโต๊ะในรายการก่อน", True); return
+            uid = sel_item[0]
+            ip = str(tree.item(uid)["values"][3])
+            if uid == MY_ID or ip == "-":
+                dim.destroy(); notify("เลือกเครื่องอื่นที่เปิดโต๊ะไว้ (ไม่ใช่เครื่องตัวเอง/เครื่องที่ซ่อนอยู่)", True); return
+            dim.destroy()
+            poker_start(ip, False, "pool")
+        row = tk.Frame(w, bg=c(PANEL)); row.pack(fill="x", padx=S(24), pady=(S(8), S(20)))
+        ttk.Button(row, text="เปิดโต๊ะที่เครื่องนี้", style="Go.TButton", command=host).pack(side="right")
+        ttk.Button(row, text="เข้าร่วมโต๊ะของเครื่องที่เลือก", style="Go.TButton", command=join).pack(side="right", padx=10)
+        ttk.Button(row, text="ยกเลิก", style="Ghost.TButton", command=dim.destroy).pack(side="right")
+    add_flow(crow, ttk.Button(crow, text="Play pool", style="Go.TButton", command=play_pool))
 
     cols = ("host", "user", "status", "ip", "ping", "ver", "ips")
     COLS_N = ("host", "user", "status", "ver")  # โหมดธรรมดาไม่แสดง IP (ยังเก็บค่าไว้ใช้เชื่อมต่อ); โหมดแอดมินแสดง IP และ ping
@@ -3689,7 +4511,7 @@ def main():
             for k in list(peers.keys()):
                 if now - peers[k]["last"] > 9:
                     del peers[k]
-            all_m = {MY_ID: {"host": HOSTNAME, "code": username(), "ip": "127.0.0.1", "ver": APP_VER, "poker": POK_ACTIVE[0] > 0}}
+            all_m = {MY_ID: {"host": HOSTNAME, "code": username(), "ip": "127.0.0.1", "ver": APP_VER, "poker": POK_ACTIVE[0] > 0, "pool": POOL_ACTIVE[0] > 0}}
             all_m.update({k: dict(v) for k, v in peers.items()})
 
         old_sel = tree.selection()
@@ -3710,7 +4532,8 @@ def main():
             if flt and flt not in f'{v["host"]} {v["code"]} {ips_txt}'.lower(): continue
             tag = "me" if k == MY_ID else "stealth" if stealth else "dup" if (old or behind) else "ok"
             who = f"(รุ่นเก่า รหัส {v['code']})" if old else v["code"]
-            if v.get("poker") and not stealth: who = "♠ " + who  # ไอคอนไพ่ = กำลังเล่น Play poker อยู่
+            if v.get("poker") and not stealth: who = "♠ " + who
+            elif v.get("pool") and not stealth: who = "◉ " + who  # ไอคอนลูกพูล = กำลังเล่น Play pool  # ไอคอนไพ่ = กำลังเล่น Play poker อยู่
             status = "รุ่นเก่า" if old else "ควรอัปเดต" if behind else "ผู้ดูแลระบบ" if stealth else "ปกติ"
             host_disp = "•" if stealth else v["host"]
             ip_disp = "-" if stealth else v["ip"]
