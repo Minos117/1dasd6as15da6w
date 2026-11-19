@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "8.0.0"
+APP_VER = "8.1.0"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -1292,8 +1292,10 @@ class PokTable:
             elif s.phase == "result" and now >= s.deadline:
                 if s.bank <= 0: s.phase, s.msg = "over", "เจ้ามือหมดตัว! เจ้าของโต๊ะกด 'เริ่มโต๊ะใหม่' ได้"
                 else: s.phase, s.msg, s.deadline = "bet", "ลงเดิมพันได้เลย", now + POK_T_BET
+                s.dealer = []  # ล้างไพ่ทั้งโต๊ะก่อนเริ่มรอบใหม่
                 for p in list(s.pl.values()):
-                    if p["gone"]: del s.pl[p["id"]]
+                    if p["gone"]: del s.pl[p["id"]]; continue
+                    p["cards"], p["res"], p["in"], p["done"] = [], None, False, False
                 s.fill()
             else: return
             s.sync(); s.push()
@@ -1503,7 +1505,8 @@ def pok_snd(name):  # เล่นเสียงเกม (ปิดได้�
         pass
 
 FELT, FELT2 = "#0b6b3f", "#0e7a4d"
-POK_RULES = ("กติกาป๊อกเด้ง (เหรียญเสมือน)\n"
+POK_RULES = ("วิธีเล่นสั้นๆ: 1) เลือกชิปเพิ่มเดิมพัน 2) กด 'ลงเดิมพัน' (ไม่เล่นรอบนี้กด 'ข้ามรอบ') 3) รอแจกไพ่ 4) ถึงตาคุณกด 'จั่ว' (ขอเพิ่ม 1 ใบ) หรือ 'อยู่' (พอแล้ว) 5) ดูผล แล้วรอบใหม่เริ่มเอง\n\n"
+             "กติกาป๊อกเด้ง (เหรียญเสมือน)\n"
              "• ไพ่ 52 ใบ A=1, 2-9 ตามแต้ม, 10 J Q K = 0 แต้มรวมเอาหลักหน่วย\n"
              "• แจกคนละ 2 ใบ ถ้ารวมได้ 8 หรือ 9 = ป๊อก ไม่ต้องจั่ว\n"
              "• ผลัดกันเล่นทีละคนตามที่นั่ง ไม่ป๊อกจั่วเพิ่มได้ 1 ใบ หมดเวลา = อยู่ เจ้ามือบอทจั่วเมื่อได้ 0-4 แต้ม ถ้าเจ้ามือป๊อกทุกคนเปิดทันที\n"
@@ -1893,8 +1896,24 @@ def poker_window(ip, myname=None):  # หน้าต่างเกมสไต
             button("b_hit", 300, 700, 250, 76, "จั่ว", "#1976d2", play_ok and mp is not None and len(mp["cards"]) == 2, lambda: go({"a": "hit"}, "hit"), 24)
             button("b_stand", 800, 700, 250, 76, "อยู่", "#ef6c00", play_ok, lambda: go({"a": "stand"}, "stand"), 24)
             if m["owner"] and m["phase"] == "over": button("b_new", 550, 700, 260, 60, "เริ่มโต๊ะใหม่", "#c62828", True, lambda: go({"a": "restart"}), 16)
-        if mp is not None and mp["coins"] <= 0 and m["phase"] != "result":
-            pill(CX, 570, 520, "เหรียญหมด — ปิดแล้วเข้าโต๊ะใหม่เพื่อเริ่ม 10,000 อีกครั้ง", "#ffffff", "#b71c1c", "ui", 12)
+        hint = ""
+        ph = m["phase"]; left = max(0, m["left"] - int(time.time() - st["t0"]))
+        if mp is not None and mp["coins"] <= 0 and ph != "result": hint = "เหรียญหมด — ปิดแล้วเข้าโต๊ะใหม่เพื่อเริ่ม 10,000 อีกครั้ง"
+        elif ph == "bet":
+            if mp is not None and mp["pass"]: hint = "คุณข้ามรอบนี้ — รอรอบถัดไป"
+            elif mp is not None and mp["bet"] > 0: hint = f"ลงเดิมพัน {mp['bet']:,} แล้ว — รอคนอื่นลง (เจ้าของโต๊ะกด 'แจกไพ่เลย' ได้)"
+            else: hint = "① เลือกชิปเพิ่มเดิมพัน   ② กด 'ลงเดิมพัน'   (ไม่เล่นรอบนี้ กด 'ข้ามรอบ')"
+        elif ph == "deal": hint = "กำลังแจกไพ่ ..."
+        elif ph == "play":
+            lab = (mp or {}).get("lab", "")
+            if m["turn"] == m["you"]: hint = f"ตาคุณ! ตอนนี้ {lab} — กด 'จั่ว' = ขอไพ่เพิ่ม 1 ใบ   กด 'อยู่' = พอแล้ว"
+            elif mp is not None and mp["in"] and mp["done"] and lab.startswith("ป๊อก"): hint = f"คุณ {lab} — ไม่ต้องจั่ว รอคนอื่นเล่น"
+            elif mp is not None and mp["in"]: hint = f"คุณ {lab} — รอถึงตาคุณ ({left} วิ)" if False else f"คุณ {lab} — รอถึงตาของคุณ"
+            else: hint = "รอบนี้คุณไม่ได้ลงเดิมพัน — ดูเพื่อนเล่นไปก่อน"
+        elif ph == "dealer": hint = "เจ้ามือกำลังเล่น ... แล้วจะเปิดไพ่ทุกคน"
+        elif ph == "result": hint = f"ดูผลรอบนี้ได้เลย — รอบใหม่เริ่มใน {left} วินาที (ไพ่จะถูกเก็บเอง)"
+        elif ph == "over": hint = "เจ้ามือหมดเหรียญ — เจ้าของโต๊ะกด 'เริ่มโต๊ะใหม่'"
+        if hint: pill(CX, 574, max(360, len(hint) * 9 + 30), hint, "#ffffff", "#0c0620", "ui", 12, True, "#ffd54f")
     def setbet(v):
         m = st["m"]; coins = me_coins()
         st["bet"] = max(min(POK_MIN, coins), min(int(v), coins)); render()
@@ -1949,6 +1968,19 @@ def poker_window(ip, myname=None):  # หน้าต่างเกมสไต
                 win.after(random.randint(0, 400), fall)
         fit("pop")
         win.after(2400, lambda: cv.delete("pop"))
+    def sweep():  # เก็บไพ่ทั้งโต๊ะกลับกองก่อนเริ่มรอบใหม่
+        n = 0
+        for key, cnt in list(st["shown"].items()):
+            for i in range(cnt):
+                x, y = slot(key, i); tg = f"sw{time.time_ns()}{n}"; n += 1
+                card(x, y, None, tg, big=st["lay"].get(key, {}).get("s", 1.0)); fit(tg)
+                def mv(k=0, tg=tg, x=x, y=y):
+                    if st["dead"]: return
+                    if k < 8: cv.move(tg, (DECK[0] - x) / 8 * KK["k"], (DECK[1] - y) / 8 * KK["k"]); win.after(28, mv, k + 1, tg, x, y)
+                    else: cv.delete(tg)
+                mv()
+        if n: pok_snd("flip")
+        st["shown"].clear(); st["prevhid"].clear(); st["q"].clear()
     def on_state(o):
         prev = st["m"]
         st["m"], st["t0"], st["note"] = o, time.time(), ""
@@ -1969,6 +2001,8 @@ def poker_window(ip, myname=None):  # หน้าต่างเกมสไต
         for p in o["players"]: keys[p["id"]] = p["cards"]
         for k in list(st["shown"]):
             if k not in keys: st["shown"].pop(k)
+        if prev is not None and o["phase"] == "bet" and prev["phase"] != "bet":
+            sweep()
         layout(o)
         newc = []
         for k, cs in keys.items():
