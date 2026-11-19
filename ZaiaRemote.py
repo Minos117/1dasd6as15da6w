@@ -18,7 +18,7 @@ except Exception:
     av = None
 
 APP_NAME = "ZaiaRemoteDesktop"
-APP_VER = "7.1.0"
+APP_VER = "8.0.0"
 SETUP_REV = 3  # เลขรุ่นของตัวติดตั้ง/ไลบรารีใน python\ ถ้า update.json ระบุ setup_rev สูงกว่านี้ ต้องลงด้วยตัวติดตั้งใหม่
 UPDATE_URL = "https://raw.githubusercontent.com/Minos117/ZaiaRemote.py/refs/heads/main/ZaiaRemote.py"  # ต้องเป็นลิงก์ดาวน์โหลดตรง (repo public)
 DEFAULT_NB_URL = "https://api.netbird.io:443"
@@ -870,7 +870,7 @@ def handle_message_client(client, ip):
 
 def send_presence():
     # โหมดแอดมิน (god mode): ไม่โชว์ชื่อเครื่อง/IP/รุ่นให้เครื่องอื่นเห็น เหลือแค่ชื่อผู้ใช้ -- เครื่องเราเองยังเห็นตัวเองปกติเสมอ (ไม่ผ่านบรรทัดนี้)
-    msg = f"{HOSTNAME}|{username()}|{APP_VER}|{MY_ID}|{'S' if ADMIN[0] else ''}".encode("utf-8")
+    msg = f"{HOSTNAME}|{username()}|{APP_VER}|{MY_ID}|{'S' if ADMIN[0] else ''}|{'P' if POK_ACTIVE[0] > 0 else ''}".encode("utf-8")
     try:
         ips = socket.gethostbyname_ex(HOSTNAME)[2]
     except Exception:
@@ -938,11 +938,12 @@ def listener():
             ver = f[2] if len(f) > 2 else "เก่า"
             uid = f[3] if len(f) > 3 else host
             stealth = len(f) > 4 and f[4] == "S"
+            playing = len(f) > 5 and f[5] == "P"  # กำลังเล่น Play poker (8.0.0+; รุ่นเก่าอ่านช่องนี้ไม่เป็นก็ไม่เป็นไร)
             if uid == MY_ID:
                 continue
             with peers_lock:
                 p = peers.setdefault(uid, {"ips": set()})
-                p.update(host=host, code=code, ver=ver, last=time.time(), ip=addr[0], stealth=stealth)
+                p.update(host=host, code=code, ver=ver, last=time.time(), ip=addr[0], stealth=stealth, poker=playing)
                 p["ips"].add(addr[0])
         except Exception as e:
             log_err(e)
@@ -1074,6 +1075,9 @@ def control_server():
             if hello == b"G":  # เกมป๊อกเด้ง (5.0.0+) ไม่เห็นจอ ไม่คุมเครื่อง จึงไม่ต้องขออนุญาต
                 threading.Thread(target=poker_serve, args=(client, addr), daemon=True).start()
                 continue
+            if hello == b"I":  # ชวนเล่นป๊อกเด้ง (8.0.0+) แค่เด้งหน้าต่างถาม ไม่เห็นจอ ไม่คุมเครื่อง
+                threading.Thread(target=poker_invite_recv, args=(client, addr), daemon=True).start()
+                continue
             if hello == b"P" or hello == b"":
                 client.close()
                 continue
@@ -1147,13 +1151,14 @@ class PokTable:
         for p in bots:
             if p["coins"] < POK_MIN: p["coins"] = POK_COINS  # บอทเติมเหรียญเสมือนเอง
             if p["bet"] == 0 and not p["pass"]: p["bet"] = min(p["coins"], random.choice((100, 200, 500, 1000)))
-    def join(s, name, send, owner):
+    def join(s, name, send, owner, ip=""):
         with s.lock:
             if len(s.seats()) >= POK_MAX:
                 idle = [p for p in s.pl.values() if p["bot"] and not p["in"]]
                 if not idle: return None
                 del s.pl[idle[0]["id"]]
             pid = s._add(name, send, owner)
+            s.pl[pid]["ip"] = ip
             s.msg = f"{s.pl[pid]['name']} เข้าร่วมโต๊ะ"
             s.fill(); s.sync(); s.push()
             return pid
@@ -1305,8 +1310,22 @@ class PokTable:
                         "lab": pok_info(p["cards"])["lab"] if show and p["cards"] else "", "res": p["res"]})
         return {"t": "st", "phase": s.phase, "round": s.round, "left": max(0, int(s.deadline - time.time())), "bank": s.bank, "you": me,
                 "turn": s.turn, "owner": bool(s.pl.get(me, {}).get("owner")), "msg": s.msg,
+                "ips": [p["ip"] for p in s.pl.values() if not p["bot"] and not p["gone"] and p.get("ip") and p["ip"] != "127.0.0.1"],
                 "dealer": {"cards": s.dealer if rev else hid(len(s.dealer)), "lab": pok_info(s.dealer)["lab"] if rev and s.dealer else ""},
                 "players": pls}
+    def say(s, pid, text):  # แชทในโต๊ะ: ทุกคนในโต๊ะเห็น (จำกัด 100 ตัวอักษร ห่างกันอย่างน้อย 0.6 วินาที ไม่เก็บประวัติ)
+        with s.lock:
+            p = s.pl.get(pid)
+            if not p or p["gone"] or s.closed: return
+            now = time.time()
+            if now - p.get("chat_at", 0) < 0.6: return
+            t = "".join(ch for ch in str(text) if ch.isprintable()).strip()[:100]
+            if not t: return
+            p["chat_at"] = now
+            for q in list(s.pl.values()):
+                if q["gone"] or q["send"] is None: continue
+                try: q["send"]({"t": "chat", "n": p["name"], "m": t})
+                except Exception: q["gone"] = True
     def push(s):
         for p in list(s.pl.values()):
             if p["gone"] or p["send"] is None: continue
@@ -1314,6 +1333,7 @@ class PokTable:
             except Exception: p["gone"] = True
 
 POKER = {"table": None}
+POK_ACTIVE = [0]  # จำนวนหน้าต่าง Play poker ที่เปิดอยู่ในเครื่องนี้ (>0 = ประกาศในรายชื่อว่ากำลังเล่น)
 
 def poker_ticker(tb):
     while not tb.closed:
@@ -1334,11 +1354,11 @@ def poker_serve(client, addr):  # เซิร์ฟเวอร์ฝั่ง�
             d = client.recv(n[0] - len(name))
             if not d: break
             name += d
-        name = name.decode("utf-8", "replace")
+        name = "".join(ch for ch in name.decode("utf-8", "replace") if ch.isprintable()).strip()[:16] or "ผู้เล่น"
         if tb is None or tb.closed:
             send({"t": "none"}); return
         client.settimeout(10)
-        pid = tb.join(name, send, addr[0] == "127.0.0.1")
+        pid = tb.join(name, send, addr[0] == "127.0.0.1", addr[0])
         if pid is None:
             send({"t": "full"}); return
         client.settimeout(None)
@@ -1352,7 +1372,9 @@ def poker_serve(client, addr):  # เซิร์ฟเวอร์ฝั่ง�
                 ln, buf = buf.split(b"\n", 1)
                 try: a = json.loads(ln.decode("utf-8"))
                 except ValueError: continue
-                if isinstance(a, dict): tb.act(pid, a)
+                if isinstance(a, dict):
+                    if a.get("a") == "chat": tb.say(pid, a.get("m", ""))
+                    else: tb.act(pid, a)
     except Exception as e:
         log_err(e)
     finally:
@@ -1368,11 +1390,95 @@ def poker_open_table():  # เปิดโต๊ะของเครื่อ�
     return tb
 
 
+POK_INV = {}  # ip -> เวลาที่ได้รับคำเชิญล่าสุด (กันสแปม)
+
+def poker_invite_recv(client, addr):  # รับคำเชิญ: {"n": ชื่อผู้เชิญ, "ip": เครื่องเจ้าของโต๊ะ หรือว่าง = เครื่องที่ส่งมา}
+    try:
+        client.settimeout(3)
+        b = b""
+        while len(b) < 2:
+            d = client.recv(2 - len(b))
+            if not d: return
+            b += d
+        n = int.from_bytes(b, "little")
+        if n > 400: return
+        body = b""
+        while len(body) < n:
+            d = client.recv(n - len(body))
+            if not d: return
+            body += d
+        o = json.loads(body.decode("utf-8"))
+        who = "".join(c for c in str(o.get("n", "")) if c.isprintable()).strip()[:24] or addr[0]
+        tip = str(o.get("ip") or addr[0])
+        with peers_lock: known = {x for v in peers.values() for x in v.get("ips", ())}
+        if tip != addr[0] and tip not in known: return  # โต๊ะต้องเป็นเครื่องของผู้เชิญ หรือเครื่องที่เห็นในวงเดียวกัน
+        now = time.time()
+        if now - POK_INV.get(addr[0], 0) < 20: return
+        POK_INV[addr[0]] = now
+        r = ROOT[0]
+        if r is not None: r.after(0, poker_show_invite, who, tip)
+    except Exception as e:
+        log_err(e)
+    finally:
+        try: client.close()
+        except Exception: pass
+
+def poker_invite_send(ip, name, host_ip):  # คืน None = ส่งแล้ว, ข้อความ = ผิดพลาด
+    try:
+        pb = json.dumps({"n": name, "ip": host_ip}, ensure_ascii=False).encode("utf-8")
+        c = socket.create_connection((ip, CTRL_PORT), timeout=4)
+        c.sendall(b"I" + len(pb).to_bytes(2, "little") + pb); c.close()
+        return None
+    except Exception as e:
+        return str(e)
+
+def poker_show_invite(who, ip):  # หน้าต่างถามว่าจะเข้าร่วมไหม (ปิดเองใน 60 วินาที)
+    root = ROOT[0]
+    if root is None: return
+    d = tk.Toplevel(root); d.title("ชวนเล่นป๊อกเด้ง"); d.configure(bg="#2a1a5e"); d.resizable(False, False)
+    try: d.attributes("-topmost", True)
+    except Exception: pass
+    tk.Label(d, text=f"{who} ชวนคุณเล่นป๊อกเด้ง", bg="#2a1a5e", fg="#ffe082", font=("Segoe UI", 14, "bold")).pack(padx=28, pady=(18, 4))
+    tk.Label(d, text="เหรียญเสมือน เล่นเอาสนุก", bg="#2a1a5e", fg="white", font=("Segoe UI", 11)).pack(padx=28)
+    row = tk.Frame(d, bg="#2a1a5e"); row.pack(pady=16)
+    def yes(): d.destroy(); poker_start(ip)
+    tk.Button(row, text="เข้าร่วม", bg="#2e9e3a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=18, pady=4, command=yes).pack(side="left", padx=8)
+    tk.Button(row, text="ไม่เล่น", bg="#546e7a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=18, pady=4, command=d.destroy).pack(side="left", padx=8)
+    d.after(60000, lambda: d.winfo_exists() and d.destroy())
+    pok_snd("invite")
+
+def poker_start(ip, host=False):  # ถามชื่อก่อนเข้าโต๊ะทุกครั้ง (เติมชื่อเดิมให้) แล้วค่อยเปิดหน้าต่างเกม host=True คือเปิดโต๊ะที่เครื่องนี้
+    root = ROOT[0]
+    if root is None: return
+    d = tk.Toplevel(root); d.title("ชื่อผู้เล่น"); d.configure(bg="#2a1a5e"); d.resizable(False, False)
+    try: d.iconbitmap(ICON_PATH)
+    except Exception: pass
+    tk.Label(d, text="ใส่ชื่อที่จะใช้ในโต๊ะนี้", bg="#2a1a5e", fg="white", font=("Segoe UI", 13, "bold")).pack(padx=28, pady=(18, 6))
+    v = tk.StringVar(value=(cfg.get("poker_name") or username() or HOSTNAME)[:16])
+    e = tk.Entry(d, textvariable=v, font=("Segoe UI", 14), width=20, justify="center"); e.pack(padx=28, pady=6)
+    def ok(_=None):
+        nm = "".join(c for c in v.get() if c.isprintable()).strip()[:16] or username() or HOSTNAME
+        cfg["poker_name"] = nm
+        try: save_config(cfg)
+        except Exception as ex: log_err(ex)
+        d.destroy()
+        if host: poker_open_table()
+        poker_window(ip, nm)
+    row = tk.Frame(d, bg="#2a1a5e"); row.pack(pady=(8, 18))
+    tk.Button(row, text="เข้าโต๊ะ", bg="#2e9e3a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=18, pady=4, command=ok).pack(side="left", padx=8)
+    tk.Button(row, text="ยกเลิก", bg="#546e7a", fg="white", font=("Segoe UI", 12, "bold"), relief="flat", padx=18, pady=4, command=d.destroy).pack(side="left", padx=8)
+    e.bind("<Return>", ok); d.bind("<Escape>", lambda _e: d.destroy())
+    try:
+        d.update_idletasks()
+        d.geometry(f"+{root.winfo_rootx() + max(0, (root.winfo_width() - d.winfo_width()) // 2)}+{root.winfo_rooty() + 120}")
+    except Exception: pass
+    e.focus_force(); e.select_range(0, "end")
+
 POK_SND = {  # เสียง 8-bit: (ความถี่ Hz, มิลลิวินาที) ความถี่ 0 = เงียบ
     "deal": [(1200, 22), (900, 25)], "flip": [(660, 25), (990, 40)], "bet": [(1320, 40), (1760, 70)],
     "turn": [(988, 90), (0, 20), (1318, 150)], "hit": [(440, 40), (660, 70)], "stand": [(330, 90)],
     "win": [(523, 90), (659, 90), (784, 90), (1047, 260)], "lose": [(392, 160), (330, 160), (262, 340)],
-    "tie": [(440, 110), (0, 30), (440, 110)]}
+    "tie": [(440, 110), (0, 30), (440, 110)], "chat": [(1568, 35), (2093, 55)], "invite": [(880, 80), (1175, 80), (1568, 80), (0, 30), (1568, 160)]}
 
 def pok_wav(name, path):  # สร้างไฟล์เสียง WAV 8 บิตจากคลื่นสี่เหลี่ยม (เสียงแบบเกมเก่า)
     import wave
@@ -1409,20 +1515,26 @@ CW, CH, GAP = 40, 56, 4  # ขนาดไพ่ (ของเรา x1.3)
 POK_CHIPS = ((100, "#d32f2f"), (500, "#1976d2"), (1000, "#2e7d32"), (5000, "#6a1b9a"))
 POK_AV = ("#e53935", "#fb8c00", "#fdd835", "#43a047", "#00acc1", "#3949ab", "#8e24aa", "#6d4c41")
 
-def poker_window(ip):  # หน้าต่างเกมสไตล์เกมมือถือ: โต๊ะรองรับ 8 ที่นั่ง อวาตาร์ ชิป ปุ่มใหญ่ แอนิเมชันแจกไพ่ และข้อความบอกตา
+def poker_window(ip, myname=None):  # หน้าต่างเกมสไตล์เกมมือถือ: โต๊ะรองรับ 8 ที่นั่ง อวาตาร์ ชิป ปุ่มใหญ่ แอนิเมชันแจกไพ่ และข้อความบอกตา
     import math
     root = ROOT[0]
     if root is None: return
     win = tk.Toplevel(root)
-    win.title("Play poker — ป๊อกเด้ง"); win.geometry("1100x780"); win.configure(bg="#150a2e"); win.resizable(True, True); win.minsize(770, 548)
+    win.title("Play poker — ป๊อกเด้ง"); win.configure(bg="#150a2e"); win.resizable(True, True); win.minsize(1000, 560)
+    try: win.geometry(f"{min(1560, win.winfo_screenwidth() - 60)}x{min(800, win.winfo_screenheight() - 100)}+20+20")
+    except Exception: win.geometry("1500x800")
     try: win.iconbitmap(ICON_PATH)
     except Exception: pass
     KK = {"k": 1.0}
     F = lambda n, b=False: ("Segoe UI", max(6, round(n * KK["k"])), "bold") if b else ("Segoe UI", max(6, round(n * KK["k"])))
     W, H, CX, CY = 1100, 780, 550, 318
     st = {"m": None, "t0": time.time(), "sock": None, "dead": False, "shown": {}, "flip": {}, "q": [], "busy": False, "prevhid": {},
-          "lay": {}, "bet": POK_MIN, "note": "", "pop": 0}
-    cv = tk.Canvas(win, width=W, height=H, bg="#150a2e", highlightthickness=0); cv.pack(expand=True)
+          "lay": {}, "bet": POK_MIN, "note": "", "pop": 0, "throw": 0.0, "bank0": None, "bdelta": 0, "fr": 0, "ids": None, "me": "", "olist": []}
+    PB, PF = "#1a1040", "#2a1a5e"
+    left = tk.Frame(win, bg=PB, width=210); left.pack(side="left", fill="y"); left.pack_propagate(False)
+    right = tk.Frame(win, bg=PB, width=260); right.pack(side="right", fill="y"); right.pack_propagate(False)
+    mid = tk.Frame(win, bg="#150a2e"); mid.pack(side="left", fill="both", expand=True)
+    cv = tk.Canvas(mid, width=W, height=H, bg="#150a2e", highlightthickness=0); cv.pack(expand=True)
     DECK = (710, 112)
 
     def rr(x1, y1, x2, y2, r, **kw):  # สี่เหลี่ยมมุมมน
@@ -1451,6 +1563,146 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
     def fit(tag):
         k = KK["k"]
         if k != 1.0: cv.scale(tag, 0, 0, k, k)
+
+    # ---- เจ้ามือ 8-bit (ตัวละครออริจินัล): พิกเซล 24x22 ----
+    DPAL = {"K": "#1a1020", "S": "#f2c08a", "s": "#d9a066", "H": "#3a2a1a", "V": "#43c46f", "v": "#2a8a4c", "W": "#ffffff", "R": "#d32f2f",
+            "B": "#2b2b45", "Y": "#ffd54f", "M": "#4a3320", "C": "#4fc3f7"}
+    DBASE = ["......KKKKKKKKKKKK......", ".....KvvvvvvvvvvvvK.....", ".....KVVVVVVVVVVVVK.....", "....KKvvvvvvvvvvvvKK....",
+             "....KHHSSSSSSSSSSHHK....", ".....KSSSSSSSSSSSSK.....", ".....KSKKSSSSSSKKSK.....", ".....KSSSSSSSSSSSSK.....",
+             ".....KSSSSSSssSSSSK.....", ".....KSMMMMMMMMMMSK.....", ".....KSSSKKKKKKSSSK.....", "......KSSSSSSSSSSK......",
+             ".......KKKKKKKKKK.......", "........KSSSSSSK........", "..KKBBBBWWRRRRWWBBBBKK..", ".KBBBBBBBWWWWWWBBBBBBBK.",
+             ".KBBBBBBBWWYWWWBBBBBBBK.", ".KBBBBBBBWWWWWWBBBBBBBK.", ".KBBBBBBBWWYWWWBBBBBBBK.", ".KBBBBBBBWWWWWWBBBBBBBK.",
+             ".KBBBBBBBWWYWWWBBBBBBBK.", ".KBBBBBBBBBBBBBBBBBBBBK."]
+    DBASE = [r.ljust(24, ".")[:24] for r in DBASE]
+    def dsprite(x, y, px, state, fr):
+        g = [list(r) for r in DBASE]
+        def put(r, c0, c1, ch):
+            for c in range(max(0, c0), min(23, c1) + 1): g[r][c] = ch
+        eyes = lambda r, ch: [put(r, 7, 8, ch), put(r, 15, 16, ch)]
+        if state == "blink" or (state in ("idle", "shuffle", "throw") and fr % 24 in (0, 1)): eyes(6, "S"); eyes(7, "K")
+        dx = 0
+        if state == "shuffle":
+            if fr % 2 == 0: put(19, 6, 8, "S"); put(19, 15, 17, "S"); put(20, 6, 8, "S"); put(20, 15, 17, "S"); put(19, 9, 14, "W")
+            else: put(18, 8, 10, "S"); put(18, 13, 15, "S"); put(17, 10, 13, "W"); put(16, 11, 12, "W")
+        elif state == "throw":
+            t = min(23, 18 + (fr % 4) * 2); put(17, 15, t, "S"); put(16, t - 1, t, "W"); put(15, t - 1, t, "W")
+        elif state == "think":
+            if fr % 6 < 3: g[6][7], g[6][8], g[6][15], g[6][16] = "K", "S", "K", "S"
+            else: g[6][7], g[6][8], g[6][15], g[6][16] = "S", "K", "S", "K"
+        elif state == "laugh":
+            dx = px if fr % 2 else 0
+            eyes(6, "S"); eyes(5, "K"); put(10, 8, 13, "K"); put(11, 8, 13, "R"); g[11][8] = g[11][13] = "K"
+            put(19, 1, 3, "S"); put(20, 1, 3, "S")
+        elif state == "shock":
+            dx = px // 2 if fr % 2 else 0
+            eyes(6, "W"); eyes(7, "W"); g[7][8] = g[7][15] = "K"; put(10, 10, 11, "K"); put(11, 10, 11, "K")
+            put(4, 19, 19, "C"); put(5, 19, 19, "C"); put(6, 20, 20, "C") if fr % 4 < 2 else put(7, 20, 20, "C")
+            for r in (15, 16, 17): put(r, 0, 2, "S"); put(r, 21, 23, "S")
+        x0, y0 = x - 12 * px + dx, y - 11 * px
+        for r, row in enumerate(g):
+            c = 0
+            while c < 24:
+                ch = row[c]
+                if ch == ".": c += 1; continue
+                c2 = c
+                while c2 + 1 < 24 and row[c2 + 1] == ch: c2 += 1
+                cv.create_rectangle(x0 + c * px, y0 + r * px, x0 + (c2 + 1) * px, y0 + (r + 1) * px, fill=DPAL[ch], outline="", tags="dealer")
+                c = c2 + 1
+    def dstate():
+        m = st["m"]; fr = st["fr"]
+        if not m: return "idle", ""
+        ph = m["phase"]
+        if time.time() - st["throw"] < 0.45 or ph == "deal": return "throw", "แจกไพ่!"
+        if ph == "bet": return "shuffle", ("ลงเดิมพันเลย!", "มาเสี่ยงดวงกัน~", "ใครกล้าบ้าง?")[(fr // 14) % 3]
+        if ph == "play": return "think", "จั่วหรืออยู่ดี~"
+        if ph == "dealer": return "think", "ตาข้าแล้ว..."
+        d = st["bdelta"]
+        if d > 0: return "laugh", "ฮ่าๆๆ กินเรียบ!"
+        if d < 0: return "shock", "โอ๊ย! เสียหนัก!"
+        return "idle", "เสมอกัน"
+    def draw_dealer():
+        cv.delete("dealer")
+        stt, say = dstate()
+        dsprite(CX, 104, 4, stt, st["fr"])
+        if say:
+            w = max(110, len(say) * 11 + 20)
+            rr(604, 59, 604 + w, 83, 10, fill="#fff8e1", outline="#1a1020", width=2, tags="dealer")
+            cv.create_polygon(604, 66, 594, 72, 606, 74, fill="#fff8e1", outline="#1a1020", tags="dealer")
+            cv.create_text(604 + w / 2, 71, text=say, fill="#1a1020", font=F(11, True), tags="dealer")
+        fit("dealer")
+    def dealer_tick():
+        if st["dead"]: return
+        st["fr"] += 1; draw_dealer(); win.after(180, dealer_tick)
+
+    # ---- แผงซ้าย: คนออนไลน์ + เชิญ / แผงขวา: แชท ----
+    tk.Label(left, text="คนออนไลน์", bg=PB, fg="#ffe082", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=12, pady=(12, 0))
+    lb_cnt = tk.Label(left, text="", bg=PB, fg="#b0a8d8", font=("Segoe UI", 9)); lb_cnt.pack(anchor="w", padx=12)
+    lbx = tk.Listbox(left, bg="#110a2b", fg="#ffffff", selectbackground="#6a3fd6", selectforeground="#ffffff", font=("Segoe UI", 11), relief="flat",
+                     highlightthickness=0, activestyle="none", exportselection=False)
+    lbx.pack(fill="both", expand=True, padx=10, pady=8)
+    inv_msg = tk.Label(left, text="เลือกชื่อแล้วกดเชิญ\n(ต้องเป็นรุ่น 8.0.0 ขึ้นไป)", bg=PB, fg="#b0a8d8", font=("Segoe UI", 9), wraplength=190, justify="left")
+    inv_msg.pack(side="bottom", anchor="w", padx=12, pady=(0, 10))
+    def do_invite():
+        i = lbx.curselection()
+        if not i or i[0] >= len(st["olist"]): inv_msg.config(text="คลิกเลือกชื่อก่อน"); return
+        uid, ips, ok_ver, _t = st["olist"][i[0]]
+        if not ok_ver: inv_msg.config(text="เครื่องนี้ยังเป็นรุ่นเก่า ต้องอัปเดตเป็น 8.0.0 ก่อนถึงจะรับเชิญได้"); return
+        who = _t
+        me_nm = st["me"] or myname or username() or HOSTNAME
+        host_ip = "" if ip == "127.0.0.1" else ip
+        inv_msg.config(text="กำลังส่งคำเชิญ ...")
+        def work():
+            err = None
+            for tip in ips:
+                err = poker_invite_send(tip, me_nm, host_ip)
+                if err is None: break
+            root.after(0, lambda: inv_msg.config(text=("ส่งคำเชิญให้ " + who.lstrip("● ").split("  ")[0] + " แล้ว") if err is None else "ส่งไม่ได้: " + err[:60]))
+        threading.Thread(target=work, daemon=True).start()
+    tk.Button(left, text="เชิญเข้าโต๊ะ", bg="#2e9e3a", fg="#ffffff", activebackground="#3cb84a", font=("Segoe UI", 12, "bold"), relief="flat", pady=6, command=do_invite).pack(side="bottom", fill="x", padx=10)
+    lbx.bind("<Double-1>", lambda e: do_invite())
+    def refresh_online():
+        if st["dead"]: return
+        now = time.time(); rows = []
+        seated = set((st["m"] or {}).get("ips", ()))
+        with peers_lock:
+            for uid, v in peers.items():
+                if now - v.get("last", 0) > 9 or v.get("stealth"): continue
+                ips = sorted(set(v.get("ips", ())) | ({v["ip"]} if v.get("ip") else set()))
+                try: new = ver_tuple(v.get("ver", "")) >= (8, 0, 0)
+                except Exception: new = False
+                tag = "  ★เจ้าของโต๊ะ" if ip in ips else "  (อยู่ในโต๊ะ)" if seated & set(ips) else "" if new else "  (รุ่นเก่า)"
+                rows.append((uid, ips, new, "● " + (v.get("code") or v.get("host") or "?") + tag))
+        rows.sort(key=lambda r: r[3])
+        if [r[3] for r in rows] != [r[3] for r in st["olist"]]:
+            cur = lbx.curselection(); keep = st["olist"][cur[0]][0] if cur and cur[0] < len(st["olist"]) else None
+            st["olist"] = rows; lbx.delete(0, "end")
+            for r in rows: lbx.insert("end", r[3])
+            for i, r in enumerate(rows):
+                lbx.itemconfig(i, fg="#ffffff" if r[2] else "#8a84ad")
+                if r[0] == keep: lbx.selection_set(i)
+        else: st["olist"] = rows
+        lb_cnt.config(text=f"{len(rows)} เครื่อง (ไม่นับเครื่องนี้)")
+        win.after(2000, refresh_online)
+    tk.Label(right, text="แชทในโต๊ะ", bg=PB, fg="#ffe082", font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=12, pady=(12, 4))
+    crow2 = tk.Frame(right, bg=PB); crow2.pack(side="bottom", fill="x", padx=10, pady=10)
+    chat_in = tk.Entry(crow2, font=("Segoe UI", 11), bg="#110a2b", fg="#ffffff", insertbackground="#ffffff", relief="flat")
+    chat_in.pack(side="left", fill="x", expand=True, ipady=5)
+    def chat_send(_e=None):
+        t = chat_in.get().strip()
+        if t: send({"a": "chat", "m": t[:100]}); chat_in.delete(0, "end")
+    tk.Button(crow2, text="ส่ง", bg="#6a3fd6", fg="#ffffff", relief="flat", font=("Segoe UI", 10, "bold"), command=chat_send).pack(side="right", padx=(6, 0), ipady=2)
+    chat_in.bind("<Return>", chat_send)
+    chat_txt = tk.Text(right, bg="#110a2b", fg="#e8e4ff", font=("Segoe UI", 10), wrap="word", relief="flat", highlightthickness=0, state="disabled", width=10)
+    chat_txt.pack(fill="both", expand=True, padx=10)
+    chat_txt.tag_config("nm", foreground="#ffd54f", font=("Segoe UI", 10, "bold")); chat_txt.tag_config("me", foreground="#4dd0e1", font=("Segoe UI", 10, "bold"))
+    chat_txt.tag_config("sys", foreground="#9c95c8", font=("Segoe UI", 9, "italic"))
+    def chat_add(who, text, kind="u"):
+        t = chat_txt; t.config(state="normal")
+        if kind == "sys": t.insert("end", text + "\n", "sys")
+        else: t.insert("end", who + ": ", "me" if who == st["me"] else "nm"); t.insert("end", text + "\n")
+        n = int(t.index("end-1c").split(".")[0])
+        if n > 300: t.delete("1.0", f"{n - 300}.0")
+        t.config(state="disabled"); t.see("end")
 
     def card(x, y, c, tag, sx=1.0, back=None, big=1.0):
         big = 1.3 if big is True else (1.0 if big is False else big)
@@ -1584,9 +1836,8 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
         button("b_rul", 770, 34, 84, 32, "กติกา", "#455a64", True, rules, 11)
         # เจ้ามือ
         D = lay["d"]
-        avatar(D["x"], D["y"], 30, "เจ้ามือ", "st", crown=True)
-        pill(D["x"] - 100, D["y"] + 4, 120, "เจ้ามือ (บอท)", "#ffffff", "#1a1040", "st", 10)
-        pill(D["x"] - 100, D["y"] + 30, 120, f"{m['bank']:,}", "#ffe082", "#3b2a00", "st", 11, True, "#e6c34a")
+        pill(D["x"] - 122, D["y"] + 4, 120, "เจ้ามือ (บอท)", "#ffffff", "#1a1040", "st", 10)
+        pill(D["x"] - 122, D["y"] + 30, 120, f"{m['bank']:,}", "#ffe082", "#3b2a00", "st", 11, True, "#e6c34a")
         sh = st["shown"].get("d", 0)
         for i, c in enumerate(m["dealer"]["cards"][:sh]):
             x, y = slot("d", i); fp = st["flip"].get("d")
@@ -1660,7 +1911,7 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
         st["busy"] = True
         ex, ey = slot(key, idx)
         big = st["lay"].get(key, {}).get("s", 1.0)
-        tag = f"fly{time.time_ns()}"
+        tag = f"fly{time.time_ns()}"; st["throw"] = time.time()
         sx, sy = DECK; card(sx, sy, None, tag, big=big); fit(tag)
         steps = 9
         def stepf(k):
@@ -1701,6 +1952,18 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
     def on_state(o):
         prev = st["m"]
         st["m"], st["t0"], st["note"] = o, time.time(), ""
+        if prev is None or (o["phase"] == "bet" and prev["phase"] != "bet"): st["bank0"] = o["bank"]
+        if o["phase"] in ("result", "over") and st["bank0"] is not None: st["bdelta"] = o["bank"] - st["bank0"]
+        elif o["phase"] != "result": st["bdelta"] = 0
+        mine = next((p["name"] for p in o["players"] if p["id"] == o["you"]), "")
+        if mine: st["me"] = mine
+        ids = {p["id"]: p["name"] for p in o["players"] if not p["bot"]}
+        if st["ids"] is not None:
+            for k, nm in ids.items():
+                if k not in st["ids"]: chat_add("", f"{nm} เข้าร่วมโต๊ะ", "sys")
+            for k, nm in st["ids"].items():
+                if k not in ids: chat_add("", f"{nm} ออกจากโต๊ะ", "sys")
+        st["ids"] = ids
         if o["phase"] == "bet" and (prev is None or prev["phase"] != "bet"): st["bet"] = max(st["bet"], POK_MIN)
         keys = {"d": o["dealer"]["cards"]}
         for p in o["players"]: keys[p["id"]] = p["cards"]
@@ -1733,6 +1996,9 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
         if st["dead"]: return
         t = o.get("t")
         if t == "st": on_state(o)
+        elif t == "chat":
+            chat_add(str(o.get("n", "?")), str(o.get("m", "")))
+            if o.get("n") != st["me"]: pok_snd("chat")
         elif t in ("none", "full", "closed"):
             st["note"] = {"none": "เครื่องนี้ยังไม่ได้เปิดโต๊ะ", "full": "โต๊ะเต็ม (สูงสุด 8 คน)", "closed": "เจ้าของโต๊ะปิดโต๊ะแล้ว"}[t]
             st["m"] = None if t != "closed" else st["m"]; render()
@@ -1748,7 +2014,7 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
         try:
             s = socket.create_connection((ip, CTRL_PORT), timeout=6)
             st["sock"] = s
-            nb = (username() or HOSTNAME).encode("utf-8")[:60]
+            nb = (myname or username() or HOSTNAME).encode("utf-8")[:60]
             s.sendall(b"G" + bytes([len(nb)]) + nb)
             s.settimeout(None)
             while True:
@@ -1764,6 +2030,7 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
             log_err(e)
         root.after(0, on_end)
     def close():
+        if not st["dead"]: POK_ACTIVE[0] = max(0, POK_ACTIVE[0] - 1)
         st["dead"] = True
         try: st["sock"].close()
         except Exception: pass
@@ -1772,20 +2039,22 @@ def poker_window(ip):  # หน้าต่างเกมสไตล์เก�
     def do_resize():
         RZ["j"] = None
         if st["dead"]: return
-        k = max(0.5, min(win.winfo_width() / W, win.winfo_height() / H))
+        k = max(0.4, min(mid.winfo_width() / W, mid.winfo_height() / H))
         if abs(k - KK["k"]) < 0.01: return
         KK["k"] = k
         cv.config(width=int(W * k), height=int(H * k))
         build_bg(); render()
     def on_cfg(e):
-        if e.widget is win:
+        if e.widget is mid:
             if RZ["j"]: win.after_cancel(RZ["j"])
             RZ["j"] = win.after(90, do_resize)
-    win.bind("<Configure>", on_cfg)
+    mid.bind("<Configure>", on_cfg)
     win.bind("<F11>", lambda e: win.attributes("-fullscreen", not win.attributes("-fullscreen")))
     win.protocol("WM_DELETE_WINDOW", close)
     threading.Thread(target=reader, daemon=True).start()
-    render(); tickui()
+    POK_ACTIVE[0] += 1
+    render(); tickui(); dealer_tick(); refresh_online()
+    chat_add("", "แชทกับคนในโต๊ะได้ที่ช่องด้านล่าง", "sys")
 
 def desktop_dir():
     buf = ctypes.create_unicode_buffer(260)
@@ -3315,7 +3584,7 @@ def main():
             return
         with peers_lock:
             ips = [ip] + sorted(peers.get(uid, {}).get("ips", set()) - {ip})
-        who = str(tree.item(uid)["values"][1])
+        who = str(tree.item(uid)["values"][1]).replace("♠ ", "", 1)
         ask_quality(who, lambda q, mon: threading.Thread(target=open_viewer, args=(ips, q, None, False, mon), daemon=True).start(), ip=ip)
     lbl_status = tk.Label(right, text="พร้อมใช้งาน", bg=PANEL, fg=SUBTEXT, anchor="w", justify="left", wraplength=S(340))
     lbl_status.pack(side="bottom", fill="x", padx=16, pady=(0, 12))
@@ -3333,8 +3602,7 @@ def main():
                  wraplength=max(min(S(620), root.winfo_width() - S(120)), S(240))).pack(anchor="w", padx=S(24), pady=(0, S(8)))
         def host():
             dim.destroy()
-            poker_open_table()
-            poker_window("127.0.0.1")
+            poker_start("127.0.0.1", True)
         def join():
             sel_item = tree.selection()
             if not sel_item:
@@ -3344,7 +3612,7 @@ def main():
             if uid == MY_ID or ip == "-":
                 dim.destroy(); notify("เลือกเครื่องอื่นที่เปิดโต๊ะไว้ (ไม่ใช่เครื่องตัวเอง/เครื่องที่ซ่อนอยู่)", True); return
             dim.destroy()
-            poker_window(ip)
+            poker_start(ip)
         row = tk.Frame(w, bg=c(PANEL)); row.pack(fill="x", padx=S(24), pady=(S(8), S(20)))
         ttk.Button(row, text="เปิดโต๊ะที่เครื่องนี้", style="Go.TButton", command=host).pack(side="right")
         ttk.Button(row, text="เข้าร่วมโต๊ะของเครื่องที่เลือก", style="Go.TButton", command=join).pack(side="right", padx=10)
@@ -3387,7 +3655,7 @@ def main():
             for k in list(peers.keys()):
                 if now - peers[k]["last"] > 9:
                     del peers[k]
-            all_m = {MY_ID: {"host": HOSTNAME, "code": username(), "ip": "127.0.0.1", "ver": APP_VER}}
+            all_m = {MY_ID: {"host": HOSTNAME, "code": username(), "ip": "127.0.0.1", "ver": APP_VER, "poker": POK_ACTIVE[0] > 0}}
             all_m.update({k: dict(v) for k, v in peers.items()})
 
         old_sel = tree.selection()
@@ -3408,6 +3676,7 @@ def main():
             if flt and flt not in f'{v["host"]} {v["code"]} {ips_txt}'.lower(): continue
             tag = "me" if k == MY_ID else "stealth" if stealth else "dup" if (old or behind) else "ok"
             who = f"(รุ่นเก่า รหัส {v['code']})" if old else v["code"]
+            if v.get("poker") and not stealth: who = "♠ " + who  # ไอคอนไพ่ = กำลังเล่น Play poker อยู่
             status = "รุ่นเก่า" if old else "ควรอัปเดต" if behind else "ผู้ดูแลระบบ" if stealth else "ปกติ"
             host_disp = "•" if stealth else v["host"]
             ip_disp = "-" if stealth else v["ip"]
